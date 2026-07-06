@@ -5,12 +5,19 @@
       Left/Right  ->  switch between the Search tab and the Craft tab
       Search tab:  type to search  |  Up/Down to pick  |  Enter to withdraw
                    then type amount, Enter to confirm  (Esc cancels, Backspace edits)
-      Craft tab:   type to search craftable items  |  Up/Down to pick  |  Enter to craft
-                   then type amount, Enter to queue the job  (Esc cancels)
-      The Craft tab needs an AE2 "ME Bridge" (Advanced Peripherals) attached to
-      this computer and networked into your ME system. Without one, the tab
-      just tells you it's unavailable and the Search tab keeps working as
-      before. See README.md for setup notes.
+      Craft tab:   type to search known recipes  |  Up/Down to pick  |  Enter
+                   then type amount, Enter shows the ingredient list (what's
+                   needed + what's missing), Enter again crafts it.
+                   [F2] Teach a new recipe: arrange the ingredients in the
+                   turtle's 3x3 crafting grid yourself, then Enter - the
+                   turtle actually crafts it once (for real) and the script
+                   remembers the arrangement + real output for next time.
+
+      The Craft tab needs a turtle (any kind) equipped with a Crafting Table,
+      placed so this computer can see it as a peripheral (directly adjacent,
+      or on the same wired modem network). Without one, the tab just tells
+      you it's unavailable and the Search tab keeps working as before.
+      See README.md for setup notes.
 
   MONITOR  ->  passive stats dashboard, auto-refreshes every 15s:
       total items, item types, slots used, and the top items in storage.
@@ -30,7 +37,7 @@ local OUTPUT = "enderstorage:ender_chest_0"
 local REMOTE_OUTPUT = nil
 local IMPORT_INTERVAL = 2     -- seconds: how often loot is pulled from INPUT
 local STATS_INTERVAL  = 600   -- seconds: full resync + repaint (600 = 10 min)
-local CRAFT_POLL_INTERVAL = 2 -- seconds: how often we check on a queued craft
+local RECIPE_FILE = "recipes.db"   -- where taught (custom) recipes are saved
 ----------------------------------------------------------------------------
 
 local monitor = peripheral.find("monitor")
@@ -46,11 +53,11 @@ for _, name in ipairs(peripheral.getNames()) do
 end
 if #storages == 0 then error("No sophisticatedstorage chests found.", 0) end
 
--- Optional: an AE2 ME Bridge (Advanced Peripherals) powers the Craft tab.
--- It's independent of the sophisticatedstorage system above; crafted items
--- are resolved and produced by your AE2 network, not by this script.
-local meBridge = peripheral.find("meBridge")
-local meOk = meBridge ~= nil
+-- Optional: a turtle equipped with a Crafting Table powers the Craft tab.
+-- It's independent of AE2/ME systems entirely - it's just a real turtle
+-- crafting real items using your existing sophisticatedstorage chests.
+local craftTurtle = peripheral.find("turtle")
+local turtleOk = craftTurtle ~= nil
 
 -- Optional: wireless/ender modem enables the pocket-computer remote.
 -- Everything still works locally if no wireless modem is attached.
@@ -83,8 +90,8 @@ local refreshBtn = nil        -- clickable area for the monitor REFRESH button
 local cIndex, cFiltered = {}, {}
 local cQuery = ""
 local cMode, cSel, cScroll, cSelected, cAmount = "browse", 1, 1, nil, ""
-local cStatusMsg = meOk and nil or "No ME Bridge found - attach one to craft."
-local craftPollTimer = nil
+local cPlan, cCycles, cShort = {}, 1, false
+local cStatusMsg = turtleOk and nil or "No turtle found - attach one to craft."
 
 local function keyOf(item) return item.name .. "|" .. (item.nbt or "") end
 
@@ -123,6 +130,12 @@ end
 
 local function findEntry(key)
   for _, e in ipairs(index) do if e.key == key then return e end end
+end
+
+-- Plain vanilla ingredient items (planks, ingots, coal...) never carry NBT,
+-- so looking them up is just keyOf with an empty NBT half.
+local function findEntryByName(name)
+  return findEntry(name .. "|")
 end
 
 local function filterBy(q)
@@ -188,52 +201,242 @@ local function withdraw(entry, amount, dest)
 end
 
 ---------------------------------------------------------------------------
--- CRAFT INDEX + ME BRIDGE CALLS
+-- RECIPE ENGINE (no AE2 - just a local recipe table + a crafting turtle)
 ---------------------------------------------------------------------------
-local function buildCraftIndex()
-  if not meOk then cIndex = {}; return end
-  local ok, items = pcall(function() return meBridge.listCraftableItems() end)
-  if not ok or not items then cIndex = {}; return end
-  cIndex = {}
-  for _, it in ipairs(items) do
-    cIndex[#cIndex + 1] = { name = it.name, displayName = it.displayName or it.name, amount = it.amount or 0 }
-  end
-  table.sort(cIndex, function(a, b) return a.displayName:lower() < b.displayName:lower() end)
+-- Turtle inventory is a 4x4 grid (slots 1-16). The vanilla crafting grid
+-- uses the top-left 3x3: recipe positions 1-9 (row-major) map to these
+-- actual turtle slots.
+local GRID_SLOTS = { 1, 2, 3, 5, 6, 7, 9, 10, 11 }
+
+local function prettify(name)
+  local short = name:gsub("^.-:", ""):gsub("_", " ")
+  return (short:gsub("(%a)([%w']*)", function(f, r) return f:upper() .. r end))
 end
 
-local function findCraftEntry(name)
-  for _, e in ipairs(cIndex) do if e.name == name then return e end end
+local function labelFor(name)
+  local e = findEntryByName(name)
+  return e and e.displayName or prettify(name)
+end
+
+local function ing(names, count) return { names = names, count = count or 1 } end
+local function single(name, count) return ing({ name }, count) end
+
+local PLANKS_ANY = {
+  "minecraft:oak_planks", "minecraft:spruce_planks", "minecraft:birch_planks",
+  "minecraft:jungle_planks", "minecraft:acacia_planks", "minecraft:dark_oak_planks",
+  "minecraft:mangrove_planks", "minecraft:cherry_planks", "minecraft:bamboo_planks",
+  "minecraft:crimson_planks", "minecraft:warped_planks",
+}
+local COAL_ANY = { "minecraft:coal", "minecraft:charcoal" }
+
+-- Grid position numbering (row-major):
+--   1 2 3
+--   4 5 6
+--   7 8 9
+local BUILTIN_RECIPES = {
+  { output = "minecraft:stick", displayName = "Stick", yield = 4,
+    grid = { [1] = ing(PLANKS_ANY), [4] = ing(PLANKS_ANY) } },
+  { output = "minecraft:torch", displayName = "Torch", yield = 4,
+    grid = { [1] = ing(COAL_ANY), [4] = single("minecraft:stick") } },
+  { output = "minecraft:crafting_table", displayName = "Crafting Table", yield = 1,
+    grid = { [1] = ing(PLANKS_ANY), [2] = ing(PLANKS_ANY), [4] = ing(PLANKS_ANY), [5] = ing(PLANKS_ANY) } },
+  { output = "minecraft:chest", displayName = "Chest", yield = 1,
+    grid = { [1] = ing(PLANKS_ANY), [2] = ing(PLANKS_ANY), [3] = ing(PLANKS_ANY),
+             [4] = ing(PLANKS_ANY),                        [6] = ing(PLANKS_ANY),
+             [7] = ing(PLANKS_ANY), [8] = ing(PLANKS_ANY), [9] = ing(PLANKS_ANY) } },
+  { output = "minecraft:furnace", displayName = "Furnace", yield = 1,
+    grid = { [1] = single("minecraft:cobblestone"), [2] = single("minecraft:cobblestone"), [3] = single("minecraft:cobblestone"),
+             [4] = single("minecraft:cobblestone"),                                         [6] = single("minecraft:cobblestone"),
+             [7] = single("minecraft:cobblestone"), [8] = single("minecraft:cobblestone"), [9] = single("minecraft:cobblestone") } },
+  { output = "minecraft:ladder", displayName = "Ladder", yield = 3,
+    grid = { [1] = single("minecraft:stick"), [3] = single("minecraft:stick"),
+             [4] = single("minecraft:stick"), [5] = single("minecraft:stick"), [6] = single("minecraft:stick"),
+             [7] = single("minecraft:stick"), [9] = single("minecraft:stick") } },
+  { output = "minecraft:bucket", displayName = "Bucket", yield = 1,
+    grid = { [1] = single("minecraft:iron_ingot"), [3] = single("minecraft:iron_ingot"), [5] = single("minecraft:iron_ingot") } },
+  { output = "minecraft:shears", displayName = "Shears", yield = 1,
+    grid = { [2] = single("minecraft:iron_ingot"), [4] = single("minecraft:iron_ingot") } },
+  { output = "minecraft:flint_and_steel", displayName = "Flint and Steel", yield = 1,
+    grid = { [1] = single("minecraft:iron_ingot"), [5] = single("minecraft:flint") } },
+}
+
+-- value 1 = material slot, value 2 = stick slot, in row-major grid positions
+local TOOL_SHAPES = {
+  pickaxe = { [1] = 1, [2] = 1, [3] = 1, [5] = 2, [8] = 2 },
+  axe     = { [1] = 1, [2] = 1, [4] = 1, [5] = 2, [8] = 2 },
+  shovel  = { [2] = 1, [5] = 2, [8] = 2 },
+  hoe     = { [1] = 1, [2] = 1, [5] = 2, [8] = 2 },
+  sword   = { [2] = 1, [5] = 1, [8] = 2 },
+}
+
+local function addToolRecipes(materialNames, idPrefix, displayPrefix)
+  for tool, shape in pairs(TOOL_SHAPES) do
+    local grid = {}
+    for pos, kind in pairs(shape) do
+      grid[pos] = (kind == 1) and ing(materialNames) or single("minecraft:stick")
+    end
+    BUILTIN_RECIPES[#BUILTIN_RECIPES + 1] = {
+      output = idPrefix .. "_" .. tool,
+      displayName = displayPrefix .. " " .. (tool:gsub("^%l", string.upper)),
+      yield = 1,
+      grid = grid,
+    }
+  end
+end
+
+addToolRecipes(PLANKS_ANY, "minecraft:wooden", "Wooden")
+addToolRecipes({ "minecraft:cobblestone" }, "minecraft:stone", "Stone")
+addToolRecipes({ "minecraft:iron_ingot" }, "minecraft:iron", "Iron")
+
+local customRecipes = {}
+local recipesByOutput = {}
+local recipes = {}
+
+local function loadCustomRecipes()
+  if not fs.exists(RECIPE_FILE) then return {} end
+  local h = fs.open(RECIPE_FILE, "r")
+  if not h then return {} end
+  local data = h.readAll(); h.close()
+  local ok, tbl = pcall(textutils.unserialize, data)
+  return (ok and type(tbl) == "table") and tbl or {}
+end
+
+local function saveCustomRecipes()
+  local h = fs.open(RECIPE_FILE, "w")
+  if not h then return end
+  h.write(textutils.serialize(customRecipes))
+  h.close()
+end
+
+local function rebuildRecipes()
+  recipesByOutput = {}
+  for _, r in ipairs(BUILTIN_RECIPES) do recipesByOutput[r.output] = r end
+  for _, r in ipairs(customRecipes) do recipesByOutput[r.output] = r end
+  recipes = {}
+  for _, r in pairs(recipesByOutput) do recipes[#recipes + 1] = r end
+  table.sort(recipes, function(a, b) return a.displayName:lower() < b.displayName:lower() end)
 end
 
 local function filterCraft(q)
-  if q == "" then return cIndex end
+  if q == "" then return recipes end
   local out, ql = {}, q:lower()
-  for _, e in ipairs(cIndex) do
-    if e.displayName:lower():find(ql, 1, true) then out[#out + 1] = e end
+  for _, r in ipairs(recipes) do
+    if r.displayName:lower():find(ql, 1, true) then out[#out + 1] = r end
   end
   return out
 end
 
 local function applyCraftFilter() cFiltered = filterCraft(cQuery) end
 
--- Kicks off an AE2 autocraft job. AE2 resolves the ingredient tree itself;
--- we just ask for `amount` of `entry.name` and report success/failure.
-local function requestCraft(entry, amount)
-  local ok, success, err = pcall(function()
-    return meBridge.craftItem({ name = entry.name, count = amount })
-  end)
-  if not ok then return false, tostring(success) end
-  return success, err
+-- Pick whichever acceptable item name has the most stock (handles "any
+-- planks"-style ingredients without needing real Minecraft tag data).
+local function resolveIngredient(ingredient, cycles)
+  local needed = ingredient.count * cycles
+  local best, bestCount = ingredient.names[1], -1
+  for _, nm in ipairs(ingredient.names) do
+    local e = findEntryByName(nm)
+    local count = e and e.count or 0
+    if count > bestCount then best, bestCount = nm, count end
+  end
+  return { name = best, needed = needed, available = bestCount, short = math.max(0, needed - bestCount) }
 end
 
-local function craftIsBusy(name)
-  local ok, crafting = pcall(function() return meBridge.isItemCrafting({ name = name }) end)
-  return ok and crafting == true
+local function planCraft(recipe, cycles)
+  local plan, anyShort = {}, false
+  for pos, ingredient in pairs(recipe.grid) do
+    local r = resolveIngredient(ingredient, cycles)
+    r.pos = pos
+    plan[#plan + 1] = r
+    if r.short > 0 then anyShort = true end
+  end
+  table.sort(plan, function(a, b) return a.pos < b.pos end)
+  return plan, anyShort
 end
 
-local function refreshCraftAmount(entry)
-  local ok, detail = pcall(function() return meBridge.getItem({ name = entry.name }) end)
-  if ok and detail then entry.amount = detail.amount or entry.amount end
+local function fillTurtleSlot(name, amount, turtleName, turtleSlot)
+  local e = findEntryByName(name)
+  if not e then return 0 end
+  local remaining = amount
+  for _, loc in ipairs(e.locations) do
+    if remaining <= 0 then break end
+    local moved = peripheral.wrap(loc.inv).pushItems(turtleName, loc.slot, remaining, turtleSlot)
+    remaining = remaining - moved
+  end
+  return amount - remaining
+end
+
+-- Executes an already-validated plan: fills the turtle's grid, crafts, then
+-- banks whatever the turtle ends up holding (output, or leftovers on failure).
+local function runCraft(recipe, cycles, plan)
+  local turtleName = peripheral.getName(craftTurtle)
+  for _, p in ipairs(plan) do
+    fillTurtleSlot(p.name, p.needed, turtleName, GRID_SLOTS[p.pos])
+  end
+  buildIndex(); applyFilter()
+
+  local callOk, craftOk, craftErr = pcall(function() return craftTurtle.craft(cycles) end)
+  absorb(turtleName)
+  buildIndex(); applyFilter()
+
+  if not callOk then return false, tostring(craftOk) end
+  return craftOk, craftErr
+end
+
+-- Learn a recipe by actually crafting whatever is currently arranged in the
+-- turtle's grid. Diffs the turtle's inventory before/after to work out
+-- exactly what was consumed (per grid slot) and what came out.
+local function performTeach()
+  local turtleName = peripheral.getName(craftTurtle)
+  local before = {}
+  for i = 1, 16 do before[i] = craftTurtle.getItemDetail(i) end
+
+  local callOk, craftOk, craftErr = pcall(function() return craftTurtle.craft(1) end)
+  if not callOk then return false, tostring(craftOk) end
+  if not craftOk then return false, craftErr or "no matching recipe for that arrangement" end
+
+  local after = {}
+  for i = 1, 16 do after[i] = craftTurtle.getItemDetail(i) end
+
+  local grid = {}
+  for pos, slot in ipairs(GRID_SLOTS) do
+    local b, a = before[slot], after[slot]
+    if b then
+      local sameItem = a and a.name == b.name
+      local consumed = sameItem and (b.count - a.count) or b.count
+      if consumed > 0 then grid[pos] = single(b.name, consumed) end
+    end
+  end
+
+  local outputName, outputDisplay, outputYield
+  for i = 1, 16 do
+    local b, a = before[i], after[i]
+    if a then
+      if not b or b.name ~= a.name then
+        outputName, outputDisplay, outputYield = a.name, a.displayName, a.count
+        break
+      elseif a.count > b.count then
+        outputName, outputDisplay, outputYield = a.name, a.displayName, a.count - b.count
+        break
+      end
+    end
+  end
+
+  if not outputName then
+    absorb(turtleName); buildIndex(); applyFilter()
+    return false, "crafted, but couldn't identify the output slot"
+  end
+
+  local recipe = { output = outputName, displayName = outputDisplay, yield = math.max(1, outputYield), grid = grid, custom = true }
+  for i = #customRecipes, 1, -1 do
+    if customRecipes[i].output == outputName then table.remove(customRecipes, i) end
+  end
+  customRecipes[#customRecipes + 1] = recipe
+  saveCustomRecipes()
+  rebuildRecipes(); applyCraftFilter()
+
+  absorb(turtleName)
+  buildIndex(); applyFilter()
+  return true, ("Learned %s (yields %d). Banked to storage."):format(outputDisplay, recipe.yield)
 end
 
 ---------------------------------------------------------------------------
@@ -352,16 +555,16 @@ local function drawSearchAmount(tw)
   term.setCursorPos(9 + #tAmount, 5); term.setTextColor(colors.yellow)
 end
 
-local function drawCraftTab(tw, th)
+local function drawCraftBrowse(tw, th)
   if cSel < 1 then cSel = 1 end
   if cSel > #cFiltered then cSel = math.max(1, #cFiltered) end
   term.setCursorPos(1, 2); term.setTextColor(colors.yellow)
   term.write("Craft: " .. cQuery)
   term.setCursorPos(1, 3); term.setTextColor(colors.lightGray)
-  term.write(("%d craftable  "):format(#cFiltered) .. "Up/Down + Enter = craft")
+  term.write(("%d known  "):format(#cFiltered) .. "Enter=select  F2=teach new")
   term.setCursorPos(1, 4)
   term.setTextColor(colors.gray)
-  term.write((cStatusMsg or "AE2 resolves ingredients; just pick + amount."):sub(1, tw))
+  term.write((cStatusMsg or "Up/Down to browse recipes."):sub(1, tw))
 
   local top = 5
   local rows = th - top + 1
@@ -374,7 +577,7 @@ local function drawCraftTab(tw, th)
     term.setCursorPos(1, y)
     term.setBackgroundColor(sel and colors.gray or colors.black)
     term.setTextColor(sel and colors.white or colors.lightGray)
-    local ln = ("%6dx %s"):format(e.amount, e.displayName):sub(1, tw)
+    local ln = ("%6dx %s"):format(e.yield, e.displayName):sub(1, tw)
     term.write(ln .. string.rep(" ", tw - #ln))
   end
   term.setBackgroundColor(colors.black); term.setTextColor(colors.yellow)
@@ -386,22 +589,54 @@ local function drawCraftAmount(tw)
   term.setCursorPos(1, 2); term.setTextColor(colors.cyan)
   term.write("Craft: " .. cSelected.displayName)
   term.setCursorPos(1, 3); term.setTextColor(colors.lightGray)
-  term.write(("In system: %d"):format(cSelected.amount))
+  term.write(("Yield per batch: %d"):format(cSelected.yield))
   term.setCursorPos(1, 5); term.setTextColor(colors.yellow)
   term.write("Amount: " .. cAmount)
   term.setCursorPos(1, 7); term.setTextColor(colors.lightGray)
-  term.write("[Enter] queue craft   [Esc] cancel   [Bksp] delete")
+  term.write("[Enter] continue   [Esc] cancel   [Bksp] delete")
   term.setCursorPos(9 + #cAmount, 5); term.setTextColor(colors.yellow)
+end
+
+local function drawCraftConfirm(tw)
+  term.setCursorBlink(false)
+  term.setCursorPos(1, 2); term.setTextColor(colors.cyan)
+  term.write(("Craft %d x %s"):format(cCycles * cSelected.yield, cSelected.displayName):sub(1, tw))
+  local y = 4
+  for _, p in ipairs(cPlan) do
+    term.setCursorPos(1, y)
+    term.setTextColor(p.short > 0 and colors.red or colors.lightGray)
+    local line = ("%-16s need %3d  have %3d"):format(labelFor(p.name):sub(1, 16), p.needed, p.available)
+    if p.short > 0 then line = line .. "  SHORT " .. p.short end
+    term.write(line:sub(1, tw))
+    y = y + 1
+  end
+  term.setCursorPos(1, y + 1); term.setTextColor(colors.lightGray)
+  if cShort then
+    term.write("Missing ingredients above.  [Esc] cancel")
+  else
+    term.write("[Enter] craft it   [Esc] cancel")
+  end
 end
 
 local function drawCraftStatus(tw)
   term.setCursorBlink(false)
   term.setCursorPos(1, 2); term.setTextColor(colors.cyan)
-  term.write("Craft: " .. cSelected.displayName)
+  term.write((cSelected and cSelected.displayName or "Teach"):sub(1, tw))
   term.setCursorPos(1, 3); term.setTextColor(colors.lightGray)
   term.write((cStatusMsg or ""):sub(1, tw))
   term.setCursorPos(1, 5); term.setTextColor(colors.gray)
-  term.write("[Enter] / [Esc] back to list (craft keeps running in AE2)")
+  term.write("[Enter] / [Esc] back to list")
+end
+
+local function drawCraftTeach(tw)
+  term.setCursorBlink(false)
+  term.setCursorPos(1, 2); term.setTextColor(colors.cyan)
+  term.write("Teach a new recipe")
+  term.setCursorPos(1, 3); term.setTextColor(colors.lightGray)
+  term.write("Arrange ingredients in the turtle's grid")
+  term.setCursorPos(1, 4); term.write("(top-left 3x3: slots 1-3, 5-7, 9-11)")
+  term.setCursorPos(1, 6); term.setTextColor(colors.yellow)
+  term.write("[Enter] capture + craft   [Esc] cancel")
 end
 
 local function drawTerminal()
@@ -413,12 +648,15 @@ local function drawTerminal()
     if tMode == "browse" then drawSearchTab(tw, th)
     elseif tMode == "amount" then drawSearchAmount(tw) end
   elseif uiTab == "craft" then
-    if not meOk then
+    if not turtleOk then
       term.setCursorPos(1, 3); term.setTextColor(colors.red)
-      term.write("No ME Bridge found - attach one to craft. See README.md.")
-    elseif cMode == "browse" then drawCraftTab(tw, th)
+      term.write("No turtle found - attach one with a Crafting Table.")
+      term.setCursorPos(1, 4); term.write("See README.md.")
+    elseif cMode == "browse" then drawCraftBrowse(tw, th)
     elseif cMode == "amount" then drawCraftAmount(tw)
+    elseif cMode == "confirm" then drawCraftConfirm(tw)
     elseif cMode == "status" then drawCraftStatus(tw)
+    elseif cMode == "teach" then drawCraftTeach(tw)
     end
   end
 end
@@ -458,27 +696,37 @@ local function handleRemote(sender, msg)
       used = usedSlots, slots = totalSlots }, REMOTE_PROTO)
 
   elseif msg.cmd == "craftSearch" then
-    if not meOk then rednet.send(sender, { ok = false, err = "no ME bridge" }, REMOTE_PROTO); return end
-    buildCraftIndex()
     local matches = filterCraft(msg.query or "")
     local out = {}
     for i = 1, math.min(#matches, msg.limit or 60) do
-      out[i] = { name = matches[i].name, displayName = matches[i].displayName, amount = matches[i].amount }
+      local r = matches[i]
+      out[i] = { output = r.output, displayName = r.displayName, yield = r.yield }
     end
     rednet.send(sender, { ok = true, items = out, total = #matches }, REMOTE_PROTO)
 
-  elseif msg.cmd == "craftRequest" then
-    if not meOk then rednet.send(sender, { ok = false, err = "no ME bridge" }, REMOTE_PROTO); return end
-    local n = math.max(1, tonumber(msg.amount) or 1)
-    local success, err = requestCraft({ name = msg.name }, n)
-    rednet.send(sender, { ok = success, err = err }, REMOTE_PROTO)
+  elseif msg.cmd == "craftPlan" then
+    if not turtleOk then rednet.send(sender, { ok = false, err = "no turtle" }, REMOTE_PROTO); return end
+    local recipe = recipesByOutput[msg.output]
+    if not recipe then rednet.send(sender, { ok = false, err = "unknown recipe" }, REMOTE_PROTO); return end
+    local n = math.max(1, tonumber(msg.amount) or recipe.yield)
+    local cycles = math.max(1, math.min(64, math.ceil(n / recipe.yield)))
+    local plan, short = planCraft(recipe, cycles)
+    local out = {}
+    for _, p in ipairs(plan) do
+      out[#out + 1] = { label = labelFor(p.name), needed = p.needed, available = p.available, short = p.short }
+    end
+    rednet.send(sender, { ok = true, cycles = cycles, produced = cycles * recipe.yield, plan = out, short = short }, REMOTE_PROTO)
 
-  elseif msg.cmd == "craftStatus" then
-    if not meOk then rednet.send(sender, { ok = false, err = "no ME bridge" }, REMOTE_PROTO); return end
-    local crafting = craftIsBusy(msg.name)
-    local ok2, detail = pcall(function() return meBridge.getItem({ name = msg.name }) end)
-    local amount = (ok2 and detail and detail.amount) or 0
-    rednet.send(sender, { ok = true, crafting = crafting, amount = amount }, REMOTE_PROTO)
+  elseif msg.cmd == "craftRequest" then
+    if not turtleOk then rednet.send(sender, { ok = false, err = "no turtle" }, REMOTE_PROTO); return end
+    local recipe = recipesByOutput[msg.output]
+    if not recipe then rednet.send(sender, { ok = false, err = "unknown recipe" }, REMOTE_PROTO); return end
+    local n = math.max(1, tonumber(msg.amount) or recipe.yield)
+    local cycles = math.max(1, math.min(64, math.ceil(n / recipe.yield)))
+    local plan, short = planCraft(recipe, cycles)
+    if short then rednet.send(sender, { ok = false, err = "missing ingredients" }, REMOTE_PROTO); return end
+    local success, err = runCraft(recipe, cycles, plan)
+    rednet.send(sender, { ok = success, err = err, produced = cycles * recipe.yield }, REMOTE_PROTO)
   end
 end
 
@@ -493,7 +741,8 @@ local function reselect()
 end
 
 buildIndex(); importInput(); buildIndex(); applyFilter()
-buildCraftIndex(); applyCraftFilter()
+customRecipes = loadCustomRecipes()
+rebuildRecipes(); applyCraftFilter()
 drawStats(); drawTerminal()
 
 local impTimer  = os.startTimer(IMPORT_INTERVAL)
@@ -524,21 +773,8 @@ while true do
     elseif ev[2] == statTimer then
       -- Periodic full resync: also catches items removed from chests by hand.
       buildIndex(); applyFilter(); reselect()
-      if meOk then buildCraftIndex(); applyCraftFilter() end
       drawStats(); drawTerminal()
       statTimer = os.startTimer(STATS_INTERVAL)
-    elseif ev[2] == craftPollTimer then
-      if uiTab == "craft" and cMode == "status" and cSelected then
-        if craftIsBusy(cSelected.name) then
-          cStatusMsg = "Crafting in progress..."
-          craftPollTimer = os.startTimer(CRAFT_POLL_INTERVAL)
-        else
-          refreshCraftAmount(cSelected)
-          cStatusMsg = ("Done. In system: %d"):format(cSelected.amount)
-          craftPollTimer = nil
-        end
-        drawTerminal()
-      end
     end
 
   elseif e1 == "char" then
@@ -549,7 +785,7 @@ while true do
       elseif tMode == "amount" then
         if c:match("%d") and #tAmount < 6 then tAmount = tAmount .. c end
       end
-    elseif uiTab == "craft" and meOk then
+    elseif uiTab == "craft" and turtleOk then
       if cMode == "browse" then
         cQuery = cQuery .. c; applyCraftFilter(); cSel = 1; cScroll = 1
       elseif cMode == "amount" then
@@ -562,10 +798,9 @@ while true do
     local code = ev[2]
     if code == keys.left or code == keys.right then
       local canSwitch = (uiTab == "search" and tMode == "browse")
-        or (uiTab == "craft" and cMode ~= "amount")
+        or (uiTab == "craft" and cMode == "browse")
       if canSwitch then
         uiTab = (uiTab == "search") and "craft" or "search"
-        if uiTab == "craft" and meOk then buildCraftIndex(); applyCraftFilter() end
         drawTerminal()
       end
 
@@ -591,35 +826,49 @@ while true do
         end
       end
 
-    elseif uiTab == "craft" and meOk then
+    elseif uiTab == "craft" and turtleOk then
       if cMode == "browse" then
         if code == keys.backspace then cQuery = cQuery:sub(1, -2); applyCraftFilter(); cSel = 1
         elseif code == keys.up then cSel = math.max(1, cSel - 1)
         elseif code == keys.down then cSel = math.min(#cFiltered, cSel + 1)
+        elseif code == keys.f2 then cMode = "teach"
         elseif code == keys.enter then
           local sel = cFiltered[cSel]
-          if sel then cSelected = sel; cAmount = "1"; cMode = "amount" end
+          if sel then cSelected = sel; cAmount = tostring(sel.yield); cMode = "amount" end
         end
         drawTerminal()
       elseif cMode == "amount" then
         if code == keys.backspace then cAmount = cAmount:sub(1, -2); drawTerminal()
         elseif code == keys.escape then cMode = "browse"; drawTerminal()
         elseif code == keys.enter then
-          local n = math.max(1, tonumber(cAmount) or 0)
-          local success, err = requestCraft(cSelected, n)
-          if success then
-            cStatusMsg = ("Queued %d x %s"):format(n, cSelected.displayName)
-            craftPollTimer = os.startTimer(CRAFT_POLL_INTERVAL)
-          else
-            cStatusMsg = "Craft failed: " .. tostring(err or "unknown error")
-            craftPollTimer = nil
-          end
+          local n = math.max(1, tonumber(cAmount) or cSelected.yield)
+          cCycles = math.max(1, math.min(64, math.ceil(n / cSelected.yield)))
+          cPlan, cShort = planCraft(cSelected, cCycles)
+          cMode = "confirm"
+          drawTerminal()
+        end
+      elseif cMode == "confirm" then
+        if code == keys.escape then cMode = "browse"; drawTerminal()
+        elseif code == keys.enter and not cShort then
+          local success, err = runCraft(cSelected, cCycles, cPlan)
+          cStatusMsg = success
+            and ("Crafted %d x %s"):format(cCycles * cSelected.yield, cSelected.displayName)
+            or ("Craft failed: " .. tostring(err or "unknown error"))
           cMode = "status"
           drawTerminal()
         end
       elseif cMode == "status" then
         if code == keys.enter or code == keys.escape then
-          cMode = "browse"; buildCraftIndex(); applyCraftFilter(); drawTerminal()
+          cStatusMsg = nil; cMode = "browse"; drawTerminal()
+        end
+      elseif cMode == "teach" then
+        if code == keys.escape then cMode = "browse"; drawTerminal()
+        elseif code == keys.enter then
+          local ok, msg = performTeach()
+          cStatusMsg = msg
+          cSelected = nil
+          cMode = "status"
+          drawTerminal()
         end
       end
     end

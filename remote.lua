@@ -2,26 +2,29 @@
   Pocket-computer remote for the storage system (CC: Tweaked).
 
   Runs on an Advanced Pocket Computer crafted with a Wireless or Ender Modem.
-  Lets you search your storage, craft via AE2, and queue withdrawals from
-  anywhere.
+  Lets you search your storage, craft known recipes, and queue withdrawals
+  from anywhere.
 
   NOTE: items can't teleport to you. A withdrawal is pushed into the OUTPUT
   barrel back at the storage computer, ready to collect when you get home.
-  Crafted items are produced into your AE2 ME system by the main computer's
-  ME Bridge; this remote just tells it what to craft and watches progress.
+  Crafting happens on the main computer's turtle; this remote just tells it
+  what to craft and shows you the ingredient list before you commit.
 
   CONTROLS
     Left/Right:  switch between the Search tab and the Craft tab.
     Search box:  type a name, Enter to search, Backspace to edit.
     Results:     Up/Down to pick, Enter to withdraw/craft, Backspace to edit.
-    Amount:      type a number, Enter to send/queue, Esc to cancel.
+    Amount:      type a number, Enter to continue, Esc to cancel.
     Tab:         deposit (search tab only, same as before).
+
+  Teaching a new recipe has to happen at the main computer, since it needs
+  you to physically arrange ingredients in the turtle - this remote can only
+  search and craft recipes it already knows.
 
   Save as "startup.lua" on the pocket computer so it runs when opened.
 --------------------------------------------------------------------------- ]]
 
 local PROTO, HOST = "cg_storage", "mainstore"
-local CRAFT_POLL_INTERVAL = 2   -- seconds: how often we check on a queued craft
 
 local modem = peripheral.find("modem")
 if not modem then
@@ -55,7 +58,7 @@ local sel, scroll = 1, 1
 local amountStr = ""
 local status    = "Type a name, Enter to search"
 
-local cMode      = "search"  -- "search" | "list" | "amount" | "status"
+local cMode      = "search"  -- "search" | "list" | "amount" | "confirm" | "status"
 local cQuery     = ""
 local citems     = {}
 local ctotal     = 0
@@ -63,7 +66,7 @@ local csel, cscroll = 1, 1
 local camountStr = ""
 local cstatus    = "Type a name, Enter to search"
 local cSelected  = nil
-local craftPollTimer = nil
+local cPlan, cCycles, cShort, cProduced = {}, 1, false, 0
 
 local function fetch()
   local r = req({ cmd = "list", query = query, limit = 100 })
@@ -148,10 +151,26 @@ local function drawCraft(w, h)
   if cMode == "amount" then
     local e = citems[csel]
     term.setCursorPos(1, 2); term.setTextColor(colors.cyan); term.write((e.displayName):sub(1, w))
-    term.setCursorPos(1, 3); term.setTextColor(colors.lightGray); term.write("In system: " .. e.amount)
+    term.setCursorPos(1, 3); term.setTextColor(colors.lightGray); term.write("Yield per batch: " .. e.yield)
     term.setCursorPos(1, 5); term.setTextColor(colors.yellow); term.write("Amount: " .. camountStr)
-    term.setCursorPos(1, 7); term.setTextColor(colors.lightGray); term.write("Enter=craft  Esc=back")
+    term.setCursorPos(1, 7); term.setTextColor(colors.lightGray); term.write("Enter=continue  Esc=back")
     term.setCursorPos(9 + #camountStr, 5); term.setTextColor(colors.yellow); term.setCursorBlink(true)
+    return
+  elseif cMode == "confirm" then
+    term.setCursorBlink(false)
+    term.setCursorPos(1, 2); term.setTextColor(colors.cyan)
+    term.write(("Craft %d x %s"):format(cProduced, cSelected.displayName):sub(1, w))
+    local y = 4
+    for _, p in ipairs(cPlan) do
+      term.setCursorPos(1, y)
+      term.setTextColor(p.short > 0 and colors.red or colors.lightGray)
+      local line = ("%-16s need %3d  have %3d"):format(p.label:sub(1, 16), p.needed, p.available)
+      if p.short > 0 then line = line .. "  SHORT " .. p.short end
+      term.write(line:sub(1, w))
+      y = y + 1
+    end
+    term.setCursorPos(1, y + 1); term.setTextColor(colors.lightGray)
+    term.write((cShort and "Missing ingredients above.  Esc=back" or "Enter=craft it  Esc=back"):sub(1, w))
     return
   elseif cMode == "status" then
     term.setCursorBlink(false)
@@ -176,13 +195,13 @@ local function drawCraft(w, h)
     term.setCursorPos(1, y)
     term.setBackgroundColor(isSel and colors.gray or colors.black)
     term.setTextColor(isSel and colors.white or colors.lightGray)
-    local ln = (("%5dx %s"):format(e.amount, e.displayName)):sub(1, w)
+    local ln = (("%5dx %s"):format(e.yield, e.displayName)):sub(1, w)
     term.write(ln .. string.rep(" ", w - #ln))
   end
   term.setBackgroundColor(colors.black)
 
   term.setCursorPos(1, h); term.setTextColor(colors.gray)
-  local hint = (cMode == "list") and "Enter=craft" or "Enter=find"
+  local hint = (cMode == "list") and "Enter=select" or "Enter=find"
   term.write(hint:sub(1, w))
 
   if cMode == "search" then
@@ -208,28 +227,7 @@ while true do
   local ev = { os.pullEvent() }
   local e1 = ev[1]
 
-  if e1 == "timer" then
-    if ev[2] == craftPollTimer then
-      if uiTab == "craft" and cMode == "status" and cSelected then
-        local r = req({ cmd = "craftStatus", name = cSelected.name })
-        if r and r.ok then
-          if r.crafting then
-            cstatus = "Crafting in progress..."
-            craftPollTimer = os.startTimer(CRAFT_POLL_INTERVAL)
-          else
-            cSelected.amount = r.amount
-            cstatus = "Done. In system: " .. r.amount
-            craftPollTimer = nil
-          end
-        else
-          cstatus = "Lost contact with server"
-          craftPollTimer = nil
-        end
-        draw()
-      end
-    end
-
-  elseif e1 == "char" then
+  if e1 == "char" then
     local c = ev[2]
     if uiTab == "search" then
       if mode == "search" then query = query .. c
@@ -246,7 +244,9 @@ while true do
 
   elseif e1 == "key" then
     local k = ev[2]
-    if (k == keys.left or k == keys.right) and mode ~= "amount" and cMode ~= "amount" then
+    if (k == keys.left or k == keys.right)
+        and mode ~= "amount"
+        and (cMode == "search" or cMode == "list") then
       uiTab = (uiTab == "search") and "craft" or "search"
       draw()
 
@@ -289,22 +289,30 @@ while true do
         if k == keys.up then csel = math.max(1, csel - 1)
         elseif k == keys.down then csel = math.min(#citems, csel + 1)
         elseif k == keys.enter then
-          if citems[csel] then cSelected = citems[csel]; camountStr = "1"; cMode = "amount" end
+          if citems[csel] then cSelected = citems[csel]; camountStr = tostring(cSelected.yield); cMode = "amount" end
         elseif k == keys.backspace then cMode = "search"
         end
       elseif cMode == "amount" then
         if k == keys.backspace then camountStr = camountStr:sub(1, -2)
         elseif k == keys.escape then cMode = "list"
         elseif k == keys.enter then
-          local n = math.max(1, tonumber(camountStr) or 1)
-          local r = req({ cmd = "craftRequest", name = cSelected.name, amount = n })
+          local n = math.max(1, tonumber(camountStr) or cSelected.yield)
+          local r = req({ cmd = "craftPlan", output = cSelected.output, amount = n })
           if r and r.ok then
-            cstatus = ("Queued %d x %s"):format(n, cSelected.displayName)
-            craftPollTimer = os.startTimer(CRAFT_POLL_INTERVAL)
+            cPlan, cCycles, cShort, cProduced = r.plan, r.cycles, r.short, r.produced
+            cMode = "confirm"
           else
-            cstatus = "Craft failed: " .. tostring((r and r.err) or "no response")
-            craftPollTimer = nil
+            cstatus = "Plan failed: " .. tostring((r and r.err) or "no response")
+            cMode = "status"
           end
+        end
+      elseif cMode == "confirm" then
+        if k == keys.escape then cMode = "list"
+        elseif k == keys.enter and not cShort then
+          cstatus = "Crafting..."; draw()
+          local r = req({ cmd = "craftRequest", output = cSelected.output, amount = cProduced }, 10)
+          if r and r.ok then cstatus = ("Crafted %d x %s"):format(r.produced or cProduced, cSelected.displayName)
+          else cstatus = "Craft failed: " .. tostring((r and r.err) or "no response") end
           cMode = "status"
         end
       elseif cMode == "status" then
