@@ -56,21 +56,29 @@ if #storages == 0 then error("No sophisticatedstorage chests found.", 0) end
 -- Optional: a turtle equipped with a Crafting Table powers the Craft tab.
 -- It's independent of AE2/ME systems entirely - it's just a real turtle
 -- crafting real items using your existing sophisticatedstorage chests.
+-- NOTE: a turtle wrapped as a peripheral only exposes remote power control
+-- (on/off/reboot) - it can't be told to craft() or have its inventory read
+-- that way. Actual crafting is done by turtle_craft.lua running ON the
+-- turtle, which this computer talks to over rednet (see TURTLE_PROTO below).
+-- We still need the wrapped peripheral itself so pushItems() has a valid
+-- network name to target when filling the turtle's grid with ingredients.
 local craftTurtle = peripheral.find("turtle")
 local turtleOk = craftTurtle ~= nil
+local turtleName = craftTurtle and peripheral.getName(craftTurtle) or nil
+local TURTLE_PROTO, TURTLE_HOST = "cg_turtle", "craftbot"
 
--- Optional: wireless/ender modem enables the pocket-computer remote.
--- Everything still works locally if no wireless modem is attached.
+-- Open rednet on every modem present: a wireless one enables the pocket
+-- remote, a wired one lets us reach the crafting turtle's helper program
+-- over the same network as the storage chests. Both are optional.
 local REMOTE_PROTO, REMOTE_HOST = "cg_storage", "mainstore"
 local remoteOn = false
 for _, name in ipairs(peripheral.getNames()) do
-  if peripheral.getType(name) == "modem" and peripheral.call(name, "isWireless") then
+  if peripheral.getType(name) == "modem" then
     rednet.open(name)
-    rednet.host(REMOTE_PROTO, REMOTE_HOST)
-    remoteOn = true
-    break
+    if peripheral.call(name, "isWireless") then remoteOn = true end
   end
 end
+if remoteOn then rednet.host(REMOTE_PROTO, REMOTE_HOST) end
 
 ---------------------------------------------------------------------------
 -- STATE
@@ -353,32 +361,56 @@ local function planCraft(recipe, cycles)
   return plan, anyShort
 end
 
-local function fillTurtleSlot(name, amount, turtleName, turtleSlot)
+local function fillTurtleSlot(name, amount, destName, turtleSlot)
   local e = findEntryByName(name)
   if not e then return 0 end
   local remaining = amount
   for _, loc in ipairs(e.locations) do
     if remaining <= 0 then break end
-    local moved = peripheral.wrap(loc.inv).pushItems(turtleName, loc.slot, remaining, turtleSlot)
+    local moved = peripheral.wrap(loc.inv).pushItems(destName, loc.slot, remaining, turtleSlot)
     remaining = remaining - moved
   end
   return amount - remaining
 end
 
+-- Only a program running ON the turtle can call turtle.craft() or read its
+-- own inventory - a peripheral-wrapped turtle only exposes remote power
+-- control. turtle_craft.lua (running on the turtle) does that work locally
+-- and answers these requests over rednet.
+local function turtleRequest(msg, timeout)
+  local addr = rednet.lookup(TURTLE_PROTO, TURTLE_HOST)
+  if not addr then return nil, "turtle helper not found - is turtle_craft.lua running on it?" end
+  rednet.send(addr, msg, TURTLE_PROTO)
+  local _, reply = rednet.receive(TURTLE_PROTO, timeout or 5)
+  if not reply then return nil, "no response from turtle" end
+  return reply
+end
+
+local function turtleCraft(cycles)
+  local reply, err = turtleRequest({ cmd = "craft", cycles = cycles })
+  if not reply then return false, err end
+  return reply.ok, reply.err
+end
+
+local function turtleSnapshot()
+  local reply, err = turtleRequest({ cmd = "snapshot" })
+  if not reply then return nil, err end
+  if not reply.ok then return nil, reply.err or "snapshot failed" end
+  return reply.slots
+end
+
 -- Executes an already-validated plan: fills the turtle's grid, crafts, then
 -- banks whatever the turtle ends up holding (output, or leftovers on failure).
 local function runCraft(recipe, cycles, plan)
-  local turtleName = peripheral.getName(craftTurtle)
   for _, p in ipairs(plan) do
     fillTurtleSlot(p.name, p.needed, turtleName, GRID_SLOTS[p.pos])
   end
   buildIndex(); applyFilter()
 
-  local callOk, craftOk, craftErr = pcall(function() return craftTurtle.craft(cycles) end)
+  local craftOk, craftErr = turtleCraft(cycles)
   absorb(turtleName)
   buildIndex(); applyFilter()
 
-  if not callOk then return false, tostring(craftOk) end
   return craftOk, craftErr
 end
 
@@ -386,16 +418,14 @@ end
 -- turtle's grid. Diffs the turtle's inventory before/after to work out
 -- exactly what was consumed (per grid slot) and what came out.
 local function performTeach()
-  local turtleName = peripheral.getName(craftTurtle)
-  local before = {}
-  for i = 1, 16 do before[i] = craftTurtle.getItemDetail(i) end
+  local before, snapErr = turtleSnapshot()
+  if not before then return false, snapErr end
 
-  local callOk, craftOk, craftErr = pcall(function() return craftTurtle.craft(1) end)
-  if not callOk then return false, tostring(craftOk) end
+  local craftOk, craftErr = turtleCraft(1)
   if not craftOk then return false, craftErr or "no matching recipe for that arrangement" end
 
-  local after = {}
-  for i = 1, 16 do after[i] = craftTurtle.getItemDetail(i) end
+  local after, snapErr2 = turtleSnapshot()
+  if not after then return false, snapErr2 end
 
   local grid = {}
   for pos, slot in ipairs(GRID_SLOTS) do
