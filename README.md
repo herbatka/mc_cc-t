@@ -20,41 +20,45 @@ existing sophisticatedstorage chests plus one crafting turtle.
 
 ### Setting up the Craft tab
 
-A turtle wrapped as a peripheral by another computer only exposes remote
-power control (on/off/reboot) — it can't be told to craft or have its
-inventory read that way. So the turtle needs **its own small helper
-program** (`turtle_craft.lua`, included in this repo) plus a modem, and the
-main computer talks to it over rednet.
+A turtle can't join a wired peripheral network at all, and wrapping one as
+a peripheral from another computer only exposes remote power control
+(on/off/reboot) — not craft() or inventory access. So the turtle needs
+**its own small helper program** (`turtle_craft.lua`, included in this
+repo) that runs locally on it, and items move in/out of the turtle through
+a **barrel placed directly below it** (since `turtle.suck()`/`turtle.drop()`
+are the only way to get items in or out of a turtle at all).
 
 1. Craft a turtle (any kind — a plain turtle is fine, no mining/fuel
    upgrades needed for this).
 2. Equip it with a **Crafting Table**: craft the turtle together with a
    Crafting Table item in a vanilla crafting grid to fuse them into a
    "Turtle (Crafting)".
-3. Attach a **Wired Modem** to the turtle and connect it into the *same*
-   wired network your sophisticatedstorage chests are already on
-   (Networking Cable, or place it directly touching another wired modem
-   that's part of that network). This is required for two reasons: it lets
-   the main computer push ingredients into the turtle's inventory by name,
-   and it lets the turtle's helper program talk to the main computer over
-   rednet. Being merely adjacent to the computer isn't enough — a bare side
-   like "bottom" isn't a network-addressable name other peripherals can
-   target, which is the "Target 'bottom' does not exist" error you'd get
-   without this step.
-4. Copy `turtle_craft.lua` onto the turtle and save it as the turtle's own
+3. Attach a modem to the turtle for rednet messaging — wired or wireless,
+   either works, since this is only used for "craft this" / "give me your
+   inventory" requests, not item transfer.
+4. Place a **barrel directly below the turtle**, and connect that barrel
+   to your existing sophisticatedstorage network (a Wired Modem on the
+   barrel, same as your other storage chests). Set `TURTLE_STAGING` in
+   `startup.lua` to that barrel's peripheral name (default:
+   `"minecraft:barrel_3"` — check yours with the `peripheral.getNames()`
+   trick if it's named differently). The main computer pushes ingredients
+   into this barrel normally; the turtle sucks them up into the right grid
+   slot, then drops everything back down into it after crafting so the
+   main computer can absorb it into storage.
+5. Copy `turtle_craft.lua` onto the turtle and save it as the turtle's own
    **`startup.lua`**, then reboot the turtle so it runs automatically. It
    just sits there listening for requests — you don't interact with it
    directly.
-5. Reboot the main computer so it picks up the turtle fresh.
+6. Reboot the main computer so it picks up the turtle and barrel fresh.
 
 That's it — the Craft tab now works with the ~24 built-in recipes (sticks,
 torches, crafting table, chest, furnace, ladder, bucket, shears, flint and
 steel, plus the full wood/stone/iron pickaxe/axe/shovel/hoe/sword set).
 
-If no turtle is found, the Craft tab just says so and the Search tab keeps
-working exactly as before. If the turtle is found but its helper program
-isn't running/reachable, attempting to craft or teach will show a clear
-"turtle helper not found" error instead of hanging.
+If no turtle or no staging barrel is found, the Craft tab just says so and
+the Search tab keeps working exactly as before. If the turtle is found but
+its helper program isn't running/reachable, attempting to craft or teach
+will show a clear "turtle helper not found" error instead of hanging.
 
 ### Teaching new recipes
 

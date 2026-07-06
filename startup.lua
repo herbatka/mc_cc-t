@@ -38,6 +38,11 @@ local REMOTE_OUTPUT = nil
 local IMPORT_INTERVAL = 2     -- seconds: how often loot is pulled from INPUT
 local STATS_INTERVAL  = 600   -- seconds: full resync + repaint (600 = 10 min)
 local RECIPE_FILE = "recipes.db"   -- where taught (custom) recipes are saved
+-- A turtle can't join a wired network at all - the only way items move in
+-- or out of one is turtle.suck()/turtle.drop(), run locally by the turtle
+-- itself. So ingredients/output are staged through a barrel placed directly
+-- BELOW the crafting turtle (turtle_craft.lua uses suckDown()/dropDown()).
+local TURTLE_STAGING = "minecraft:barrel_3"
 ----------------------------------------------------------------------------
 
 local monitor = peripheral.find("monitor")
@@ -56,16 +61,15 @@ if #storages == 0 then error("No sophisticatedstorage chests found.", 0) end
 -- Optional: a turtle equipped with a Crafting Table powers the Craft tab.
 -- It's independent of AE2/ME systems entirely - it's just a real turtle
 -- crafting real items using your existing sophisticatedstorage chests.
--- NOTE: a turtle wrapped as a peripheral only exposes remote power control
--- (on/off/reboot) - it can't be told to craft() or have its inventory read
--- that way. Actual crafting is done by turtle_craft.lua running ON the
--- turtle, which this computer talks to over rednet (see TURTLE_PROTO below).
--- We still need the wrapped peripheral itself so pushItems() has a valid
--- network name to target when filling the turtle's grid with ingredients.
+-- NOTE: a turtle can't join a wired network or be addressed by pushItems at
+-- all - a peripheral-wrapped turtle only exposes remote power control
+-- (on/off/reboot). Actual crafting, and moving items in/out of the turtle,
+-- is done by turtle_craft.lua running ON the turtle, which this computer
+-- talks to over rednet (see TURTLE_PROTO below) and which stages items
+-- through TURTLE_STAGING using turtle.suck()/turtle.drop().
 local craftTurtle = peripheral.find("turtle")
-local turtleOk = craftTurtle ~= nil
-local turtleName = craftTurtle and peripheral.getName(craftTurtle) or nil
 local TURTLE_PROTO, TURTLE_HOST = "cg_turtle", "craftbot"
+local turtleOk = craftTurtle ~= nil and peripheral.isPresent(TURTLE_STAGING)
 
 -- Open rednet on every modem present: a wireless one enables the pocket
 -- remote, a wired one lets us reach the crafting turtle's helper program
@@ -99,7 +103,12 @@ local cIndex, cFiltered = {}, {}
 local cQuery = ""
 local cMode, cSel, cScroll, cSelected, cAmount = "browse", 1, 1, nil, ""
 local cPlan, cCycles, cShort = {}, 1, false
-local cStatusMsg = turtleOk and nil or "No turtle found - attach one to craft."
+local cStatusMsg
+if not craftTurtle then
+  cStatusMsg = "No turtle found - attach one to craft."
+elseif not peripheral.isPresent(TURTLE_STAGING) then
+  cStatusMsg = "No staging barrel found at " .. TURTLE_STAGING .. " (see README)."
+end
 
 local function keyOf(item) return item.name .. "|" .. (item.nbt or "") end
 
@@ -361,22 +370,24 @@ local function planCraft(recipe, cycles)
   return plan, anyShort
 end
 
-local function fillTurtleSlot(name, amount, destName, turtleSlot)
+-- Pushes `amount` of `name` from storage into the staging barrel (the
+-- turtle sucks it from there itself - see below).
+local function pushToBarrel(name, amount)
   local e = findEntryByName(name)
   if not e then return 0 end
   local remaining = amount
   for _, loc in ipairs(e.locations) do
     if remaining <= 0 then break end
-    local moved = peripheral.wrap(loc.inv).pushItems(destName, loc.slot, remaining, turtleSlot)
+    local moved = peripheral.wrap(loc.inv).pushItems(TURTLE_STAGING, loc.slot, remaining)
     remaining = remaining - moved
   end
   return amount - remaining
 end
 
--- Only a program running ON the turtle can call turtle.craft() or read its
--- own inventory - a peripheral-wrapped turtle only exposes remote power
--- control. turtle_craft.lua (running on the turtle) does that work locally
--- and answers these requests over rednet.
+-- Only a program running ON the turtle can call turtle.craft(), read its
+-- own inventory, or move items in/out of it - a peripheral-wrapped turtle
+-- only exposes remote power control. turtle_craft.lua (running on the
+-- turtle) does that work locally and answers these requests over rednet.
 local function turtleRequest(msg, timeout)
   local addr = rednet.lookup(TURTLE_PROTO, TURTLE_HOST)
   if not addr then return nil, "turtle helper not found - is turtle_craft.lua running on it?" end
@@ -399,16 +410,50 @@ local function turtleSnapshot()
   return reply.slots
 end
 
--- Executes an already-validated plan: fills the turtle's grid, crafts, then
--- banks whatever the turtle ends up holding (output, or leftovers on failure).
+-- Tells the turtle to suckDown() `count` of whatever's currently staged in
+-- the barrel into grid slot `slot`. Ingredients must be staged one distinct
+-- item at a time (see runCraft) since suck() can't filter by item name.
+local function turtleLoadSlot(slot, count)
+  local reply, err = turtleRequest({ cmd = "loadSlot", slot = slot, count = count })
+  if not reply then return false, err end
+  return reply.ok, reply.err
+end
+
+-- Tells the turtle to dropDown() its entire inventory into the staging
+-- barrel, so this computer can absorb() it back into storage.
+local function turtleDump()
+  turtleRequest({ cmd = "dump" })
+end
+
+-- Executes an already-validated plan: stages + loads ingredients one
+-- distinct item at a time, crafts, then banks whatever came out (or
+-- leftovers, on failure) via the staging barrel.
 local function runCraft(recipe, cycles, plan)
+  local groups, order = {}, {}
   for _, p in ipairs(plan) do
-    fillTurtleSlot(p.name, p.needed, turtleName, GRID_SLOTS[p.pos])
+    if not groups[p.name] then groups[p.name] = {}; order[#order + 1] = p.name end
+    table.insert(groups[p.name], p)
   end
-  buildIndex(); applyFilter()
+
+  for _, name in ipairs(order) do
+    local entries = groups[name]
+    local total = 0
+    for _, p in ipairs(entries) do total = total + p.needed end
+    pushToBarrel(name, total)
+    buildIndex(); applyFilter()
+    for _, p in ipairs(entries) do
+      local ok, err = turtleLoadSlot(GRID_SLOTS[p.pos], p.needed)
+      if not ok then
+        turtleDump(); absorb(TURTLE_STAGING); buildIndex(); applyFilter()
+        return false, err or ("couldn't load " .. labelFor(name))
+      end
+    end
+  end
 
   local craftOk, craftErr = turtleCraft(cycles)
-  absorb(turtleName)
+
+  turtleDump()
+  absorb(TURTLE_STAGING)
   buildIndex(); applyFilter()
 
   return craftOk, craftErr
@@ -452,7 +497,7 @@ local function performTeach()
   end
 
   if not outputName then
-    absorb(turtleName); buildIndex(); applyFilter()
+    turtleDump(); absorb(TURTLE_STAGING); buildIndex(); applyFilter()
     return false, "crafted, but couldn't identify the output slot"
   end
 
@@ -464,7 +509,8 @@ local function performTeach()
   saveCustomRecipes()
   rebuildRecipes(); applyCraftFilter()
 
-  absorb(turtleName)
+  turtleDump()
+  absorb(TURTLE_STAGING)
   buildIndex(); applyFilter()
   return true, ("Learned %s (yields %d). Banked to storage."):format(outputDisplay, recipe.yield)
 end
