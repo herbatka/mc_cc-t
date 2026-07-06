@@ -418,14 +418,30 @@ local function turtleLoadSlot(slot, count)
 end
 
 -- Tells the turtle to dropDown() its entire inventory into the staging
--- barrel, so this computer can absorb() it back into storage.
+-- barrel, so this computer can collect it from there.
 local function turtleDump()
   turtleRequest({ cmd = "dump" })
 end
 
+-- Dumps the turtle's inventory into the staging barrel, sends anything
+-- matching `outputName` on to OUTPUT (so crafted items land where
+-- withdrawals do), and banks everything else (leftovers) into storage.
+-- Pass nil to just bank everything (e.g. on failure, recovering ingredients).
+local function collectFromTurtle(outputName)
+  turtleDump()
+  if outputName then
+    local inv = peripheral.wrap(TURTLE_STAGING)
+    for slot, item in pairs(inv.list()) do
+      if item.name == outputName then inv.pushItems(OUTPUT, slot) end
+    end
+  end
+  absorb(TURTLE_STAGING)
+  buildIndex(); applyFilter()
+end
+
 -- Executes an already-validated plan: stages + loads ingredients one
--- distinct item at a time, crafts, then banks whatever came out (or
--- leftovers, on failure) via the staging barrel.
+-- distinct item at a time, crafts, then delivers the output to OUTPUT (or
+-- banks leftovers back to storage, on failure) via the staging barrel.
 local function runCraft(recipe, cycles, plan)
   local groups, order = {}, {}
   for _, p in ipairs(plan) do
@@ -442,17 +458,14 @@ local function runCraft(recipe, cycles, plan)
     for _, p in ipairs(entries) do
       local ok, err = turtleLoadSlot(GRID_SLOTS[p.pos], p.needed)
       if not ok then
-        turtleDump(); absorb(TURTLE_STAGING); buildIndex(); applyFilter()
+        collectFromTurtle(nil)
         return false, err or ("couldn't load " .. labelFor(name))
       end
     end
   end
 
   local craftOk, craftErr = turtleCraft(cycles)
-
-  turtleDump()
-  absorb(TURTLE_STAGING)
-  buildIndex(); applyFilter()
+  collectFromTurtle(craftOk and recipe.output or nil)
 
   return craftOk, craftErr
 end
@@ -495,7 +508,7 @@ local function performTeach()
   end
 
   if not outputName then
-    turtleDump(); absorb(TURTLE_STAGING); buildIndex(); applyFilter()
+    collectFromTurtle(nil)
     return false, "crafted, but couldn't identify the output slot"
   end
 
@@ -507,10 +520,8 @@ local function performTeach()
   saveCustomRecipes()
   rebuildRecipes(); applyCraftFilter()
 
-  turtleDump()
-  absorb(TURTLE_STAGING)
-  buildIndex(); applyFilter()
-  return true, ("Learned %s (yields %d). Banked to storage."):format(outputDisplay, recipe.yield)
+  collectFromTurtle(outputName)
+  return true, ("Learned %s (yields %d). Sent to output."):format(outputDisplay, recipe.yield)
 end
 
 ---------------------------------------------------------------------------

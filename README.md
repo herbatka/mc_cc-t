@@ -12,8 +12,10 @@ them with the **Left/Right** arrow keys.
 - **Craft** — type the name of a known recipe, Up/Down to pick a match,
   Enter to set a quantity. It then shows the exact ingredient list — what's
   needed and what you're short on — before you commit. If everything's in
-  stock, Enter crafts it for real using a turtle, and the result is banked
-  straight back into storage.
+  stock, Enter crafts it for real using a turtle, and the crafted item is
+  delivered to OUTPUT (same chest withdrawals go to) so it's waiting for
+  you to collect. Any leftover ingredients (e.g. if a craft fails partway)
+  go back into general storage instead.
 
 No AE2/ME system involved — this is entirely self-contained, using your
 existing sophisticatedstorage chests plus one crafting turtle.
