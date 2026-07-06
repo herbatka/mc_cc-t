@@ -726,7 +726,7 @@ local function drawTerminal()
   elseif uiTab == "craft" then
     if not turtleOk then
       term.setCursorPos(1, 3); term.setTextColor(colors.red)
-      term.write("No turtle found - attach one with a Crafting Table.")
+      term.write((cStatusMsg or "Craft tab unavailable."):sub(1, tw))
       term.setCursorPos(1, 4); term.write("See README.md.")
     elseif cMode == "browse" then drawCraftBrowse(tw, th)
     elseif cMode == "amount" then drawCraftAmount(tw)
