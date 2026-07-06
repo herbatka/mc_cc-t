@@ -2,22 +2,26 @@
   Compact-storage system for CC: Tweaked (ATM10 / MC 1.21.1).
 
   INTERACTION  ->  keyboard, at the computer (right-click it):
-      Left/Right  ->  switch between the Search tab and the Craft tab
+      (Minecraft eats Escape and most F-keys before they reach a computer -
+      Escape closes the screen, F2 takes a screenshot - so this UI never
+      uses them. Left/Right switch tabs; [C] cancels instead of Escape.)
+
+      Left/Right  ->  cycle between the Search / Craft / Teach tabs
       Search tab:  type to search  |  Up/Down to pick  |  Enter to withdraw
-                   then type amount, Enter to confirm  (Esc cancels, Backspace edits)
+                   then type amount, Enter to confirm  ([C] cancels, Backspace edits)
       Craft tab:   type to search known recipes  |  Up/Down to pick  |  Enter
                    then type amount, Enter shows the ingredient list (what's
                    needed + what's missing), Enter again crafts it.
-                   [F2] Teach a new recipe: arrange the ingredients in the
-                   turtle's 3x3 crafting grid yourself, then Enter - the
-                   turtle actually crafts it once (for real) and the script
-                   remembers the arrangement + real output for next time.
+      Teach tab:   arrange the ingredients in the turtle's 3x3 crafting grid
+                   yourself, then Enter - the turtle actually crafts it once
+                   (for real) and the script remembers the arrangement +
+                   real output for next time.
 
-      The Craft tab needs a turtle (any kind) equipped with a Crafting Table,
-      placed so this computer can see it as a peripheral (directly adjacent,
-      or on the same wired modem network). Without one, the tab just tells
-      you it's unavailable and the Search tab keeps working as before.
-      See README.md for setup notes.
+      The Craft/Teach tabs need a turtle (any kind) equipped with a Crafting
+      Table, plus a staging barrel placed directly below it and wired into
+      your storage network (see TURTLE_STAGING below). Without that, the
+      tabs just say so and the Search tab keeps working as before.
+      See README.md for full setup notes.
 
   MONITOR  ->  passive stats dashboard, auto-refreshes every 15s:
       total items, item types, slots used, and the top items in storage.
@@ -107,6 +111,7 @@ local cMode, cSel, cScroll, cSelected, cAmount = "browse", 1, 1, nil, ""
 local cPlan, cCycles, cShort = {}, 1, false
 local cStatusMsg = turtleOk and nil
   or ("No staging barrel found at " .. TURTLE_STAGING .. " (see README).")
+local tchMsg = nil   -- last teach-attempt result, shown on the Teach tab
 
 local function keyOf(item) return item.name .. "|" .. (item.nbt or "") end
 
@@ -589,9 +594,24 @@ local function drawTabBar(tw)
   seg(" Search ", uiTab == "search")
   term.setBackgroundColor(colors.black); term.setTextColor(colors.white); term.write(" ")
   seg(" Craft ", uiTab == "craft")
+  term.setBackgroundColor(colors.black); term.setTextColor(colors.white); term.write(" ")
+  seg(" Teach ", uiTab == "teach")
   term.setBackgroundColor(colors.black); term.setTextColor(colors.white)
-  local used = 8 + 1 + 7
+  local used = 8 + 1 + 7 + 1 + 7
   if tw > used then term.write(string.rep(" ", tw - used)) end
+end
+
+-- Minecraft eats Escape and most F-keys before they ever reach the
+-- computer as key events (Escape closes the screen, F2 takes a
+-- screenshot, etc.), so tabs cycle with Left/Right instead of a hotkey.
+local UI_TAB_ORDER = { "search", "craft", "teach" }
+local function nextTab(t, dir)
+  local i = 1
+  for idx, v in ipairs(UI_TAB_ORDER) do if v == t then i = idx end end
+  i = i + dir
+  if i < 1 then i = #UI_TAB_ORDER end
+  if i > #UI_TAB_ORDER then i = 1 end
+  return UI_TAB_ORDER[i]
 end
 
 local function drawSearchTab(tw, th)
@@ -636,7 +656,7 @@ local function drawSearchAmount(tw)
   term.setCursorPos(1, 5); term.setTextColor(colors.yellow)
   term.write("Amount: " .. tAmount)
   term.setCursorPos(1, 7); term.setTextColor(colors.lightGray)
-  term.write("[Enter] confirm   [Esc] cancel   [Bksp] delete")
+  term.write("[Enter] confirm   [C] cancel   [Bksp] delete")
   term.setCursorPos(9 + #tAmount, 5); term.setTextColor(colors.yellow)
 end
 
@@ -646,7 +666,7 @@ local function drawCraftBrowse(tw, th)
   term.setCursorPos(1, 2); term.setTextColor(colors.yellow)
   term.write("Craft: " .. cQuery)
   term.setCursorPos(1, 3); term.setTextColor(colors.lightGray)
-  term.write(("%d known  "):format(#cFiltered) .. "Enter=select  F2=teach new")
+  term.write(("%d known  "):format(#cFiltered) .. "Enter=select")
   term.setCursorPos(1, 4)
   term.setTextColor(colors.gray)
   term.write((cStatusMsg or "Up/Down to browse recipes."):sub(1, tw))
@@ -678,7 +698,7 @@ local function drawCraftAmount(tw)
   term.setCursorPos(1, 5); term.setTextColor(colors.yellow)
   term.write("Amount: " .. cAmount)
   term.setCursorPos(1, 7); term.setTextColor(colors.lightGray)
-  term.write("[Enter] continue   [Esc] cancel   [Bksp] delete")
+  term.write("[Enter] continue   [C] cancel   [Bksp] delete")
   term.setCursorPos(9 + #cAmount, 5); term.setTextColor(colors.yellow)
 end
 
@@ -697,9 +717,9 @@ local function drawCraftConfirm(tw)
   end
   term.setCursorPos(1, y + 1); term.setTextColor(colors.lightGray)
   if cShort then
-    term.write("Missing ingredients above.  [Esc] cancel")
+    term.write("Missing ingredients above.  [C] cancel")
   else
-    term.write("[Enter] craft it   [Esc] cancel")
+    term.write("[Enter] craft it   [C] cancel")
   end
 end
 
@@ -710,10 +730,10 @@ local function drawCraftStatus(tw)
   term.setCursorPos(1, 3); term.setTextColor(colors.lightGray)
   term.write((cStatusMsg or ""):sub(1, tw))
   term.setCursorPos(1, 5); term.setTextColor(colors.gray)
-  term.write("[Enter] / [Esc] back to list")
+  term.write("[Enter] back to list")
 end
 
-local function drawCraftTeach(tw)
+local function drawTeachTab(tw)
   term.setCursorBlink(false)
   term.setCursorPos(1, 2); term.setTextColor(colors.cyan)
   term.write("Teach a new recipe")
@@ -721,7 +741,9 @@ local function drawCraftTeach(tw)
   term.write("Arrange ingredients in the turtle's grid")
   term.setCursorPos(1, 4); term.write("(top-left 3x3: slots 1-3, 5-7, 9-11)")
   term.setCursorPos(1, 6); term.setTextColor(colors.yellow)
-  term.write("[Enter] capture + craft   [Esc] cancel")
+  term.write("[Enter] capture + craft")
+  term.setCursorPos(1, 8); term.setTextColor(colors.lightGray)
+  term.write((tchMsg or ""):sub(1, tw))
 end
 
 local function drawTerminal()
@@ -741,7 +763,14 @@ local function drawTerminal()
     elseif cMode == "amount" then drawCraftAmount(tw)
     elseif cMode == "confirm" then drawCraftConfirm(tw)
     elseif cMode == "status" then drawCraftStatus(tw)
-    elseif cMode == "teach" then drawCraftTeach(tw)
+    end
+  elseif uiTab == "teach" then
+    if not turtleOk then
+      term.setCursorPos(1, 3); term.setTextColor(colors.red)
+      term.write((cStatusMsg or "Teach tab unavailable."):sub(1, tw))
+      term.setCursorPos(1, 4); term.write("See README.md.")
+    else
+      drawTeachTab(tw)
     end
   end
 end
@@ -881,11 +910,14 @@ while true do
 
   elseif e1 == "key" then
     local code = ev[2]
+    -- Minecraft eats Escape and most F-keys before they reach the computer,
+    -- so cancel uses [C] and tabs cycle with Left/Right instead of hotkeys.
     if code == keys.left or code == keys.right then
       local canSwitch = (uiTab == "search" and tMode == "browse")
         or (uiTab == "craft" and cMode == "browse")
+        or (uiTab == "teach")
       if canSwitch then
-        uiTab = (uiTab == "search") and "craft" or "search"
+        uiTab = nextTab(uiTab, code == keys.right and 1 or -1)
         drawTerminal()
       end
 
@@ -901,7 +933,7 @@ while true do
         drawTerminal()
       elseif tMode == "amount" then
         if code == keys.backspace then tAmount = tAmount:sub(1, -2); drawTerminal()
-        elseif code == keys.escape then tMode = "browse"; drawTerminal()
+        elseif code == keys.c then tMode = "browse"; drawTerminal()
         elseif code == keys.enter then
           local n = math.min(tonumber(tAmount) or 0, tSelected.count)
           if n > 0 then withdraw(tSelected, n) end
@@ -916,7 +948,6 @@ while true do
         if code == keys.backspace then cQuery = cQuery:sub(1, -2); applyCraftFilter(); cSel = 1
         elseif code == keys.up then cSel = math.max(1, cSel - 1)
         elseif code == keys.down then cSel = math.min(#cFiltered, cSel + 1)
-        elseif code == keys.f2 then cMode = "teach"
         elseif code == keys.enter then
           local sel = cFiltered[cSel]
           if sel then cSelected = sel; cAmount = tostring(sel.yield); cMode = "amount" end
@@ -924,7 +955,7 @@ while true do
         drawTerminal()
       elseif cMode == "amount" then
         if code == keys.backspace then cAmount = cAmount:sub(1, -2); drawTerminal()
-        elseif code == keys.escape then cMode = "browse"; drawTerminal()
+        elseif code == keys.c then cMode = "browse"; drawTerminal()
         elseif code == keys.enter then
           local n = math.max(1, tonumber(cAmount) or cSelected.yield)
           cCycles = math.max(1, math.min(64, math.ceil(n / cSelected.yield)))
@@ -933,7 +964,7 @@ while true do
           drawTerminal()
         end
       elseif cMode == "confirm" then
-        if code == keys.escape then cMode = "browse"; drawTerminal()
+        if code == keys.c then cMode = "browse"; drawTerminal()
         elseif code == keys.enter and not cShort then
           local success, err = runCraft(cSelected, cCycles, cPlan)
           cStatusMsg = success
@@ -943,18 +974,16 @@ while true do
           drawTerminal()
         end
       elseif cMode == "status" then
-        if code == keys.enter or code == keys.escape then
+        if code == keys.enter or code == keys.c then
           cStatusMsg = nil; cMode = "browse"; drawTerminal()
         end
-      elseif cMode == "teach" then
-        if code == keys.escape then cMode = "browse"; drawTerminal()
-        elseif code == keys.enter then
-          local ok, msg = performTeach()
-          cStatusMsg = msg
-          cSelected = nil
-          cMode = "status"
-          drawTerminal()
-        end
+      end
+
+    elseif uiTab == "teach" and turtleOk then
+      if code == keys.enter then
+        local ok, msg = performTeach()
+        tchMsg = msg
+        drawTerminal()
       end
     end
 

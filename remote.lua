@@ -14,7 +14,7 @@
     Left/Right:  switch between the Search tab and the Craft tab.
     Search box:  type a name, Enter to search, Backspace to edit.
     Results:     Up/Down to pick, Enter to withdraw/craft, Backspace to edit.
-    Amount:      type a number, Enter to continue, Esc to cancel.
+    Amount:      type a number, Enter to continue, C to cancel.
     Tab:         deposit (search tab only, same as before).
 
   Teaching a new recipe has to happen at the main computer, since it needs
@@ -114,7 +114,7 @@ local function drawSearch(w, h)
     term.setCursorPos(1, 2); term.setTextColor(colors.cyan); term.write((e.name):sub(1, w))
     term.setCursorPos(1, 3); term.setTextColor(colors.lightGray); term.write("Have: " .. e.count)
     term.setCursorPos(1, 5); term.setTextColor(colors.yellow); term.write("Amount: " .. amountStr)
-    term.setCursorPos(1, 7); term.setTextColor(colors.lightGray); term.write("Enter=send  Esc=back")
+    term.setCursorPos(1, 7); term.setTextColor(colors.lightGray); term.write("Enter=send  C=back")
     term.setCursorPos(9 + #amountStr, 5); term.setTextColor(colors.yellow); term.setCursorBlink(true)
     return
   end
@@ -153,7 +153,7 @@ local function drawCraft(w, h)
     term.setCursorPos(1, 2); term.setTextColor(colors.cyan); term.write((e.displayName):sub(1, w))
     term.setCursorPos(1, 3); term.setTextColor(colors.lightGray); term.write("Yield per batch: " .. e.yield)
     term.setCursorPos(1, 5); term.setTextColor(colors.yellow); term.write("Amount: " .. camountStr)
-    term.setCursorPos(1, 7); term.setTextColor(colors.lightGray); term.write("Enter=continue  Esc=back")
+    term.setCursorPos(1, 7); term.setTextColor(colors.lightGray); term.write("Enter=continue  C=back")
     term.setCursorPos(9 + #camountStr, 5); term.setTextColor(colors.yellow); term.setCursorBlink(true)
     return
   elseif cMode == "confirm" then
@@ -170,14 +170,14 @@ local function drawCraft(w, h)
       y = y + 1
     end
     term.setCursorPos(1, y + 1); term.setTextColor(colors.lightGray)
-    term.write((cShort and "Missing ingredients above.  Esc=back" or "Enter=craft it  Esc=back"):sub(1, w))
+    term.write((cShort and "Missing ingredients above.  C=back" or "Enter=craft it  C=back"):sub(1, w))
     return
   elseif cMode == "status" then
     term.setCursorBlink(false)
     term.setCursorPos(1, 2); term.setTextColor(colors.cyan)
     term.write((cSelected and cSelected.displayName or ""):sub(1, w))
     term.setCursorPos(1, 3); term.setTextColor(colors.lightGray); term.write(cstatus:sub(1, w))
-    term.setCursorPos(1, h); term.setTextColor(colors.gray); term.write("Enter/Esc = back to list")
+    term.setCursorPos(1, h); term.setTextColor(colors.gray); term.write("Enter/C = back to list")
     return
   end
 
@@ -268,7 +268,7 @@ while true do
         end
       elseif mode == "amount" then
         if k == keys.backspace then amountStr = amountStr:sub(1, -2)
-        elseif k == keys.escape then mode = "list"
+        elseif k == keys.c then mode = "list"
         elseif k == keys.enter then
           local e = items[sel]
           local n = math.min(tonumber(amountStr) or 0, e.count)
@@ -294,7 +294,7 @@ while true do
         end
       elseif cMode == "amount" then
         if k == keys.backspace then camountStr = camountStr:sub(1, -2)
-        elseif k == keys.escape then cMode = "list"
+        elseif k == keys.c then cMode = "list"
         elseif k == keys.enter then
           local n = math.max(1, tonumber(camountStr) or cSelected.yield)
           local r = req({ cmd = "craftPlan", output = cSelected.output, amount = n })
@@ -307,7 +307,7 @@ while true do
           end
         end
       elseif cMode == "confirm" then
-        if k == keys.escape then cMode = "list"
+        if k == keys.c then cMode = "list"
         elseif k == keys.enter and not cShort then
           cstatus = "Crafting..."; draw()
           local r = req({ cmd = "craftRequest", output = cSelected.output, amount = cProduced }, 10)
@@ -316,7 +316,7 @@ while true do
           cMode = "status"
         end
       elseif cMode == "status" then
-        if k == keys.enter or k == keys.escape then cMode = "list" end
+        if k == keys.enter or k == keys.c then cMode = "list" end
       end
       draw()
     end

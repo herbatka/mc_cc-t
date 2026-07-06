@@ -3,9 +3,13 @@ programiki do computercraft do minecraft
 
 ## Storage + crafting interface
 
-`startup.lua` (main computer) and `remote.lua` (pocket computer) both show
-two tabs at the top of the screen: **Search** and **Craft**. Switch between
-them with the **Left/Right** arrow keys.
+`startup.lua` (main computer) shows three tabs at the top: **Search**,
+**Craft**, and **Teach**. `remote.lua` (pocket computer) shows Search and
+Craft (teaching needs you physically at the turtle, so it's main-computer
+only). Cycle between tabs with the **Left/Right** arrow keys, and use **C**
+instead of Escape to cancel out of a screen — Minecraft's client eats
+Escape (closes the screen) and most F-keys (F2 = screenshot, etc.) before a
+computer program ever sees them, so this UI avoids both entirely.
 
 - **Search** — unchanged: type to search your sophisticatedstorage chests,
   Up/Down to pick, Enter to withdraw an amount.
@@ -16,6 +20,8 @@ them with the **Left/Right** arrow keys.
   delivered to OUTPUT (same chest withdrawals go to) so it's waiting for
   you to collect. Any leftover ingredients (e.g. if a craft fails partway)
   go back into general storage instead.
+- **Teach** — arrange ingredients in the turtle's crafting grid yourself,
+  then Enter to learn the recipe for real (see below).
 
 No AE2/ME system involved — this is entirely self-contained, using your
 existing sophisticatedstorage chests plus one crafting turtle.
@@ -72,7 +78,7 @@ found" error instead of hanging.
 For anything not in the built-in list (modded items, other tool tiers,
 whatever), teach it directly:
 
-1. In the Craft tab, press **F2** ("teach new").
+1. Switch to the **Teach** tab (Left/Right).
 2. Physically place the ingredients into the turtle's crafting grid — the
    top-left 3x3 of its inventory (slots 1-3, 5-7, 9-11).
 3. Press Enter. The turtle actually crafts it for real, using the genuine
