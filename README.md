@@ -20,22 +20,41 @@ existing sophisticatedstorage chests plus one crafting turtle.
 
 ### Setting up the Craft tab
 
-1. Craft a turtle (any kind — a plain turtle is fine, you don't need mining
-   or fuel-related upgrades for this).
+A turtle wrapped as a peripheral by another computer only exposes remote
+power control (on/off/reboot) — it can't be told to craft or have its
+inventory read that way. So the turtle needs **its own small helper
+program** (`turtle_craft.lua`, included in this repo) plus a modem, and the
+main computer talks to it over rednet.
+
+1. Craft a turtle (any kind — a plain turtle is fine, no mining/fuel
+   upgrades needed for this).
 2. Equip it with a **Crafting Table**: craft the turtle together with a
    Crafting Table item in a vanilla crafting grid to fuse them into a
    "Turtle (Crafting)".
-3. Place that turtle so this computer can see it as a peripheral — directly
-   touching the computer, or on the same Wired Modem network the computer's
-   modem is on (same rule as the sophisticatedstorage chests). No script
-   config needed; it's auto-detected via `peripheral.find("turtle")`.
+3. Attach a **Wired Modem** to the turtle and connect it into the *same*
+   wired network your sophisticatedstorage chests are already on
+   (Networking Cable, or place it directly touching another wired modem
+   that's part of that network). This is required for two reasons: it lets
+   the main computer push ingredients into the turtle's inventory by name,
+   and it lets the turtle's helper program talk to the main computer over
+   rednet. Being merely adjacent to the computer isn't enough — a bare side
+   like "bottom" isn't a network-addressable name other peripherals can
+   target, which is the "Target 'bottom' does not exist" error you'd get
+   without this step.
+4. Copy `turtle_craft.lua` onto the turtle and save it as the turtle's own
+   **`startup.lua`**, then reboot the turtle so it runs automatically. It
+   just sits there listening for requests — you don't interact with it
+   directly.
+5. Reboot the main computer so it picks up the turtle fresh.
 
 That's it — the Craft tab now works with the ~24 built-in recipes (sticks,
 torches, crafting table, chest, furnace, ladder, bucket, shears, flint and
 steel, plus the full wood/stone/iron pickaxe/axe/shovel/hoe/sword set).
 
 If no turtle is found, the Craft tab just says so and the Search tab keeps
-working exactly as before.
+working exactly as before. If the turtle is found but its helper program
+isn't running/reachable, attempting to craft or teach will show a clear
+"turtle helper not found" error instead of hanging.
 
 ### Teaching new recipes
 
