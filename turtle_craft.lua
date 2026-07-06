@@ -1,23 +1,23 @@
 --[[  turtle_craft.lua  -------------------------------------------------------
   Runs ON the crafting turtle itself (save this as the turtle's "startup.lua").
 
-  CC:Tweaked only lets another computer remotely power-cycle a turtle
-  (on/off/reboot) - it can't remotely call turtle.craft() or read the
-  turtle's inventory. Only a program running locally on the turtle can do
-  that, using the turtle's own `turtle` API. So this tiny helper sits on the
-  turtle, listens for requests from the main storage computer over rednet,
-  and does the actual crafting/inventory-reading locally.
+  A turtle can't join a wired peripheral network at all, and a turtle
+  wrapped as a peripheral by another computer only exposes remote power
+  control (on/off/reboot) - not craft() or inventory access. Only a program
+  running locally on the turtle can call turtle.craft() or move items in/out
+  of its own inventory (turtle.suck()/turtle.drop() and friends). So this
+  tiny helper sits on the turtle, listens for requests from the main storage
+  computer over rednet, and does that work locally.
 
-  Needs BOTH: a modem for rednet messaging (wired or wireless - either
-  works), AND a Wired Modem specifically attached to the turtle and joined
-  to the same wired network as the storage chests, so the main computer can
-  push ingredients into this turtle's inventory by name. A wireless modem
-  alone lets messages through but does NOT make the turtle's inventory
-  network-addressable - the two are separate things.
+  Items move in/out of the turtle through a barrel placed directly BELOW it
+  (TURTLE_STAGING in startup.lua on the main computer) - the main computer
+  pushes ingredients into that barrel normally, this program sucks them up
+  into the right grid slot, and after crafting it drops everything back down
+  into the barrel for the main computer to absorb into storage.
 
-  Note: wired modems aren't a turtle "upgrade" you craft/equip - place one
-  by right-clicking it onto an outer face of the turtle, the same way you'd
-  attach one to a chest.
+  Needs a modem (wired or wireless, either works) for rednet messaging to
+  the main computer - that's just for the "craft this" / "give me your
+  inventory" requests, unrelated to the barrel-based item transfer above.
 --------------------------------------------------------------------------- ]]
 
 local PROTO, HOST = "cg_turtle", "craftbot"
@@ -49,6 +49,23 @@ while true do
       local slots = {}
       for i = 1, 16 do slots[i] = turtle.getItemDetail(i) end
       rednet.send(sender, { ok = true, slots = slots }, PROTO)
+
+    elseif msg.cmd == "loadSlot" then
+      -- Suck `count` of whatever's currently in the staging barrel below
+      -- into grid slot `slot`. The main computer only stages one distinct
+      -- item at a time, so there's no ambiguity about what gets picked up.
+      turtle.select(msg.slot)
+      local ok, err = turtle.suckDown(msg.count)
+      rednet.send(sender, { ok = ok, err = err }, PROTO)
+
+    elseif msg.cmd == "dump" then
+      -- Drop everything (crafted output + any leftovers) into the barrel
+      -- below so the main computer can absorb it back into storage.
+      for i = 1, 16 do
+        turtle.select(i)
+        turtle.dropDown()
+      end
+      rednet.send(sender, { ok = true }, PROTO)
 
     elseif msg.cmd == "ping" then
       rednet.send(sender, { ok = true }, PROTO)
