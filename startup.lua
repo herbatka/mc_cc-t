@@ -2,8 +2,15 @@
   Compact-storage system for CC: Tweaked (ATM10 / MC 1.21.1).
 
   INTERACTION  ->  keyboard, at the computer (right-click it):
-      type to search  |  Up/Down to pick  |  Enter to withdraw
-      then type amount, Enter to confirm  (Esc cancels, Backspace edits)
+      Left/Right  ->  switch between the Search tab and the Craft tab
+      Search tab:  type to search  |  Up/Down to pick  |  Enter to withdraw
+                   then type amount, Enter to confirm  (Esc cancels, Backspace edits)
+      Craft tab:   type to search craftable items  |  Up/Down to pick  |  Enter to craft
+                   then type amount, Enter to queue the job  (Esc cancels)
+      The Craft tab needs an AE2 "ME Bridge" (Advanced Peripherals) attached to
+      this computer and networked into your ME system. Without one, the tab
+      just tells you it's unavailable and the Search tab keeps working as
+      before. See README.md for setup notes.
 
   MONITOR  ->  passive stats dashboard, auto-refreshes every 15s:
       total items, item types, slots used, and the top items in storage.
@@ -23,6 +30,7 @@ local OUTPUT = "enderstorage:ender_chest_0"
 local REMOTE_OUTPUT = nil
 local IMPORT_INTERVAL = 2     -- seconds: how often loot is pulled from INPUT
 local STATS_INTERVAL  = 600   -- seconds: full resync + repaint (600 = 10 min)
+local CRAFT_POLL_INTERVAL = 2 -- seconds: how often we check on a queued craft
 ----------------------------------------------------------------------------
 
 local monitor = peripheral.find("monitor")
@@ -37,6 +45,12 @@ for _, name in ipairs(peripheral.getNames()) do
   if name:find("^sophisticatedstorage:") then storages[#storages + 1] = name end
 end
 if #storages == 0 then error("No sophisticatedstorage chests found.", 0) end
+
+-- Optional: an AE2 ME Bridge (Advanced Peripherals) powers the Craft tab.
+-- It's independent of the sophisticatedstorage system above; crafted items
+-- are resolved and produced by your AE2 network, not by this script.
+local meBridge = peripheral.find("meBridge")
+local meOk = meBridge ~= nil
 
 -- Optional: wireless/ender modem enables the pocket-computer remote.
 -- Everything still works locally if no wireless modem is attached.
@@ -60,9 +74,17 @@ local usedSlots, totalSlots = 0, 0
 local query = ""
 
 -- terminal (keyboard) UI state
+local uiTab = "search"    -- "search" | "craft"
 local tMode, tSel, tScroll, tSelected, tAmount = "browse", 1, 1, nil, ""
 local pollCount, barrelSeen, lastErr = 0, 0, nil   -- import heartbeat / diagnostics
 local refreshBtn = nil        -- clickable area for the monitor REFRESH button
+
+-- craft tab state
+local cIndex, cFiltered = {}, {}
+local cQuery = ""
+local cMode, cSel, cScroll, cSelected, cAmount = "browse", 1, 1, nil, ""
+local cStatusMsg = meOk and nil or "No ME Bridge found - attach one to craft."
+local craftPollTimer = nil
 
 local function keyOf(item) return item.name .. "|" .. (item.nbt or "") end
 
@@ -166,6 +188,55 @@ local function withdraw(entry, amount, dest)
 end
 
 ---------------------------------------------------------------------------
+-- CRAFT INDEX + ME BRIDGE CALLS
+---------------------------------------------------------------------------
+local function buildCraftIndex()
+  if not meOk then cIndex = {}; return end
+  local ok, items = pcall(function() return meBridge.listCraftableItems() end)
+  if not ok or not items then cIndex = {}; return end
+  cIndex = {}
+  for _, it in ipairs(items) do
+    cIndex[#cIndex + 1] = { name = it.name, displayName = it.displayName or it.name, amount = it.amount or 0 }
+  end
+  table.sort(cIndex, function(a, b) return a.displayName:lower() < b.displayName:lower() end)
+end
+
+local function findCraftEntry(name)
+  for _, e in ipairs(cIndex) do if e.name == name then return e end end
+end
+
+local function filterCraft(q)
+  if q == "" then return cIndex end
+  local out, ql = {}, q:lower()
+  for _, e in ipairs(cIndex) do
+    if e.displayName:lower():find(ql, 1, true) then out[#out + 1] = e end
+  end
+  return out
+end
+
+local function applyCraftFilter() cFiltered = filterCraft(cQuery) end
+
+-- Kicks off an AE2 autocraft job. AE2 resolves the ingredient tree itself;
+-- we just ask for `amount` of `entry.name` and report success/failure.
+local function requestCraft(entry, amount)
+  local ok, success, err = pcall(function()
+    return meBridge.craftItem({ name = entry.name, count = amount })
+  end)
+  if not ok then return false, tostring(success) end
+  return success, err
+end
+
+local function craftIsBusy(name)
+  local ok, crafting = pcall(function() return meBridge.isItemCrafting({ name = name }) end)
+  return ok and crafting == true
+end
+
+local function refreshCraftAmount(entry)
+  local ok, detail = pcall(function() return meBridge.getItem({ name = entry.name }) end)
+  if ok and detail then entry.amount = detail.amount or entry.amount end
+end
+
+---------------------------------------------------------------------------
 -- MONITOR: STATS DASHBOARD (passive)
 ---------------------------------------------------------------------------
 local function comma(n)
@@ -220,53 +291,135 @@ end
 ---------------------------------------------------------------------------
 -- TERMINAL: KEYBOARD UI (all interaction happens here)
 ---------------------------------------------------------------------------
+local function drawTabBar(tw)
+  term.setCursorPos(1, 1)
+  local function seg(label, active)
+    term.setBackgroundColor(active and colors.blue or colors.black)
+    term.setTextColor(active and colors.white or colors.lightGray)
+    term.write(label)
+  end
+  seg(" Search ", uiTab == "search")
+  term.setBackgroundColor(colors.black); term.setTextColor(colors.white); term.write(" ")
+  seg(" Craft ", uiTab == "craft")
+  term.setBackgroundColor(colors.black); term.setTextColor(colors.white)
+  local used = 8 + 1 + 7
+  if tw > used then term.write(string.rep(" ", tw - used)) end
+end
+
+local function drawSearchTab(tw, th)
+  if tSel < 1 then tSel = 1 end
+  if tSel > #filtered then tSel = math.max(1, #filtered) end
+  term.setCursorPos(1, 2); term.setTextColor(colors.yellow)
+  term.write("Search: " .. query)
+  term.setCursorPos(1, 3); term.setTextColor(colors.lightGray)
+  term.write(("%d matches  "):format(#filtered) .. "Up/Down + Enter = withdraw")
+  term.setCursorPos(1, 4)
+  if lastErr then
+    term.setTextColor(colors.red); term.write(("ERR: " .. lastErr):sub(1, tw))
+  else
+    term.setTextColor(colors.gray)
+    term.write(("poll #%d   in-barrel: %d"):format(pollCount, barrelSeen):sub(1, tw))
+  end
+
+  local top = 5
+  local rows = th - top + 1
+  if tSel < tScroll then tScroll = tSel end
+  if tSel > tScroll + rows - 1 then tScroll = tSel - rows + 1 end
+  if tScroll < 1 then tScroll = 1 end
+  for i = 0, rows - 1 do
+    local e = filtered[tScroll + i]; if not e then break end
+    local y, sel = top + i, (tScroll + i == tSel)
+    term.setCursorPos(1, y)
+    term.setBackgroundColor(sel and colors.gray or colors.black)
+    term.setTextColor(sel and colors.white or colors.lightGray)
+    local ln = ("%6dx %s"):format(e.count, e.displayName):sub(1, tw)
+    term.write(ln .. string.rep(" ", tw - #ln))
+  end
+  term.setBackgroundColor(colors.black); term.setTextColor(colors.yellow)
+  term.setCursorPos(9 + #query, 2); term.setCursorBlink(true)
+end
+
+local function drawSearchAmount(tw)
+  term.setCursorBlink(true)
+  term.setCursorPos(1, 2); term.setTextColor(colors.cyan)
+  term.write("Withdraw: " .. tSelected.displayName)
+  term.setCursorPos(1, 3); term.setTextColor(colors.lightGray)
+  term.write(("Available: %d"):format(tSelected.count))
+  term.setCursorPos(1, 5); term.setTextColor(colors.yellow)
+  term.write("Amount: " .. tAmount)
+  term.setCursorPos(1, 7); term.setTextColor(colors.lightGray)
+  term.write("[Enter] confirm   [Esc] cancel   [Bksp] delete")
+  term.setCursorPos(9 + #tAmount, 5); term.setTextColor(colors.yellow)
+end
+
+local function drawCraftTab(tw, th)
+  if cSel < 1 then cSel = 1 end
+  if cSel > #cFiltered then cSel = math.max(1, #cFiltered) end
+  term.setCursorPos(1, 2); term.setTextColor(colors.yellow)
+  term.write("Craft: " .. cQuery)
+  term.setCursorPos(1, 3); term.setTextColor(colors.lightGray)
+  term.write(("%d craftable  "):format(#cFiltered) .. "Up/Down + Enter = craft")
+  term.setCursorPos(1, 4)
+  term.setTextColor(colors.gray)
+  term.write((cStatusMsg or "AE2 resolves ingredients; just pick + amount."):sub(1, tw))
+
+  local top = 5
+  local rows = th - top + 1
+  if cSel < cScroll then cScroll = cSel end
+  if cSel > cScroll + rows - 1 then cScroll = cSel - rows + 1 end
+  if cScroll < 1 then cScroll = 1 end
+  for i = 0, rows - 1 do
+    local e = cFiltered[cScroll + i]; if not e then break end
+    local y, sel = top + i, (cScroll + i == cSel)
+    term.setCursorPos(1, y)
+    term.setBackgroundColor(sel and colors.gray or colors.black)
+    term.setTextColor(sel and colors.white or colors.lightGray)
+    local ln = ("%6dx %s"):format(e.amount, e.displayName):sub(1, tw)
+    term.write(ln .. string.rep(" ", tw - #ln))
+  end
+  term.setBackgroundColor(colors.black); term.setTextColor(colors.yellow)
+  term.setCursorPos(8 + #cQuery, 2); term.setCursorBlink(true)
+end
+
+local function drawCraftAmount(tw)
+  term.setCursorBlink(true)
+  term.setCursorPos(1, 2); term.setTextColor(colors.cyan)
+  term.write("Craft: " .. cSelected.displayName)
+  term.setCursorPos(1, 3); term.setTextColor(colors.lightGray)
+  term.write(("In system: %d"):format(cSelected.amount))
+  term.setCursorPos(1, 5); term.setTextColor(colors.yellow)
+  term.write("Amount: " .. cAmount)
+  term.setCursorPos(1, 7); term.setTextColor(colors.lightGray)
+  term.write("[Enter] queue craft   [Esc] cancel   [Bksp] delete")
+  term.setCursorPos(9 + #cAmount, 5); term.setTextColor(colors.yellow)
+end
+
+local function drawCraftStatus(tw)
+  term.setCursorBlink(false)
+  term.setCursorPos(1, 2); term.setTextColor(colors.cyan)
+  term.write("Craft: " .. cSelected.displayName)
+  term.setCursorPos(1, 3); term.setTextColor(colors.lightGray)
+  term.write((cStatusMsg or ""):sub(1, tw))
+  term.setCursorPos(1, 5); term.setTextColor(colors.gray)
+  term.write("[Enter] / [Esc] back to list (craft keeps running in AE2)")
+end
+
 local function drawTerminal()
   local tw, th = term.getSize()
   term.setBackgroundColor(colors.black); term.setTextColor(colors.white); term.clear()
+  drawTabBar(tw)
 
-  if tMode == "browse" then
-    if tSel < 1 then tSel = 1 end
-    if tSel > #filtered then tSel = math.max(1, #filtered) end
-    term.setCursorPos(1, 1); term.setTextColor(colors.yellow)
-    term.write("Search: " .. query)
-    term.setCursorPos(1, 2); term.setTextColor(colors.lightGray)
-    term.write(("%d matches  "):format(#filtered) .. "Up/Down + Enter = withdraw")
-    term.setCursorPos(1, 3)
-    if lastErr then
-      term.setTextColor(colors.red); term.write(("ERR: " .. lastErr):sub(1, tw))
-    else
-      term.setTextColor(colors.gray)
-      term.write(("poll #%d   in-barrel: %d"):format(pollCount, barrelSeen):sub(1, tw))
+  if uiTab == "search" then
+    if tMode == "browse" then drawSearchTab(tw, th)
+    elseif tMode == "amount" then drawSearchAmount(tw) end
+  elseif uiTab == "craft" then
+    if not meOk then
+      term.setCursorPos(1, 3); term.setTextColor(colors.red)
+      term.write("No ME Bridge found - attach one to craft. See README.md.")
+    elseif cMode == "browse" then drawCraftTab(tw, th)
+    elseif cMode == "amount" then drawCraftAmount(tw)
+    elseif cMode == "status" then drawCraftStatus(tw)
     end
-
-    local top = 4
-    local rows = th - top + 1
-    if tSel < tScroll then tScroll = tSel end
-    if tSel > tScroll + rows - 1 then tScroll = tSel - rows + 1 end
-    if tScroll < 1 then tScroll = 1 end
-    for i = 0, rows - 1 do
-      local e = filtered[tScroll + i]; if not e then break end
-      local y, sel = top + i, (tScroll + i == tSel)
-      term.setCursorPos(1, y)
-      term.setBackgroundColor(sel and colors.gray or colors.black)
-      term.setTextColor(sel and colors.white or colors.lightGray)
-      local ln = ("%6dx %s"):format(e.count, e.displayName):sub(1, tw)
-      term.write(ln .. string.rep(" ", tw - #ln))
-    end
-    term.setBackgroundColor(colors.black); term.setTextColor(colors.yellow)
-    term.setCursorPos(9 + #query, 1); term.setCursorBlink(true)
-
-  elseif tMode == "amount" then
-    term.setCursorBlink(true)
-    term.setCursorPos(1, 1); term.setTextColor(colors.cyan)
-    term.write("Withdraw: " .. tSelected.displayName)
-    term.setCursorPos(1, 2); term.setTextColor(colors.lightGray)
-    term.write(("Available: %d"):format(tSelected.count))
-    term.setCursorPos(1, 4); term.setTextColor(colors.yellow)
-    term.write("Amount: " .. tAmount)
-    term.setCursorPos(1, 6); term.setTextColor(colors.lightGray)
-    term.write("[Enter] confirm   [Esc] cancel   [Bksp] delete")
-    term.setCursorPos(9 + #tAmount, 4); term.setTextColor(colors.yellow)
   end
 end
 
@@ -303,6 +456,29 @@ local function handleRemote(sender, msg)
     for _, e in ipairs(index) do total = total + e.count end
     rednet.send(sender, { ok = true, total = total, types = #index,
       used = usedSlots, slots = totalSlots }, REMOTE_PROTO)
+
+  elseif msg.cmd == "craftSearch" then
+    if not meOk then rednet.send(sender, { ok = false, err = "no ME bridge" }, REMOTE_PROTO); return end
+    buildCraftIndex()
+    local matches = filterCraft(msg.query or "")
+    local out = {}
+    for i = 1, math.min(#matches, msg.limit or 60) do
+      out[i] = { name = matches[i].name, displayName = matches[i].displayName, amount = matches[i].amount }
+    end
+    rednet.send(sender, { ok = true, items = out, total = #matches }, REMOTE_PROTO)
+
+  elseif msg.cmd == "craftRequest" then
+    if not meOk then rednet.send(sender, { ok = false, err = "no ME bridge" }, REMOTE_PROTO); return end
+    local n = math.max(1, tonumber(msg.amount) or 1)
+    local success, err = requestCraft({ name = msg.name }, n)
+    rednet.send(sender, { ok = success, err = err }, REMOTE_PROTO)
+
+  elseif msg.cmd == "craftStatus" then
+    if not meOk then rednet.send(sender, { ok = false, err = "no ME bridge" }, REMOTE_PROTO); return end
+    local crafting = craftIsBusy(msg.name)
+    local ok2, detail = pcall(function() return meBridge.getItem({ name = msg.name }) end)
+    local amount = (ok2 and detail and detail.amount) or 0
+    rednet.send(sender, { ok = true, crafting = crafting, amount = amount }, REMOTE_PROTO)
   end
 end
 
@@ -317,6 +493,7 @@ local function reselect()
 end
 
 buildIndex(); importInput(); buildIndex(); applyFilter()
+buildCraftIndex(); applyCraftFilter()
 drawStats(); drawTerminal()
 
 local impTimer  = os.startTimer(IMPORT_INTERVAL)
@@ -347,39 +524,103 @@ while true do
     elseif ev[2] == statTimer then
       -- Periodic full resync: also catches items removed from chests by hand.
       buildIndex(); applyFilter(); reselect()
+      if meOk then buildCraftIndex(); applyCraftFilter() end
       drawStats(); drawTerminal()
       statTimer = os.startTimer(STATS_INTERVAL)
+    elseif ev[2] == craftPollTimer then
+      if uiTab == "craft" and cMode == "status" and cSelected then
+        if craftIsBusy(cSelected.name) then
+          cStatusMsg = "Crafting in progress..."
+          craftPollTimer = os.startTimer(CRAFT_POLL_INTERVAL)
+        else
+          refreshCraftAmount(cSelected)
+          cStatusMsg = ("Done. In system: %d"):format(cSelected.amount)
+          craftPollTimer = nil
+        end
+        drawTerminal()
+      end
     end
 
   elseif e1 == "char" then
     local c = ev[2]
-    if tMode == "browse" then
-      query = query .. c; applyFilter(); tSel = 1; tScroll = 1
-    elseif tMode == "amount" then
-      if c:match("%d") and #tAmount < 6 then tAmount = tAmount .. c end
+    if uiTab == "search" then
+      if tMode == "browse" then
+        query = query .. c; applyFilter(); tSel = 1; tScroll = 1
+      elseif tMode == "amount" then
+        if c:match("%d") and #tAmount < 6 then tAmount = tAmount .. c end
+      end
+    elseif uiTab == "craft" and meOk then
+      if cMode == "browse" then
+        cQuery = cQuery .. c; applyCraftFilter(); cSel = 1; cScroll = 1
+      elseif cMode == "amount" then
+        if c:match("%d") and #cAmount < 6 then cAmount = cAmount .. c end
+      end
     end
     drawTerminal()
 
   elseif e1 == "key" then
     local code = ev[2]
-    if tMode == "browse" then
-      if code == keys.backspace then query = query:sub(1, -2); applyFilter(); tSel = 1
-      elseif code == keys.up then tSel = math.max(1, tSel - 1)
-      elseif code == keys.down then tSel = math.min(#filtered, tSel + 1)
-      elseif code == keys.enter then
-        local sel = filtered[tSel]
-        if sel then tSelected = sel; tAmount = tostring(math.min(64, sel.count)); tMode = "amount" end
+    if code == keys.left or code == keys.right then
+      local canSwitch = (uiTab == "search" and tMode == "browse")
+        or (uiTab == "craft" and cMode ~= "amount")
+      if canSwitch then
+        uiTab = (uiTab == "search") and "craft" or "search"
+        if uiTab == "craft" and meOk then buildCraftIndex(); applyCraftFilter() end
+        drawTerminal()
       end
-      drawTerminal()
-    elseif tMode == "amount" then
-      if code == keys.backspace then tAmount = tAmount:sub(1, -2); drawTerminal()
-      elseif code == keys.escape then tMode = "browse"; drawTerminal()
-      elseif code == keys.enter then
-        local n = math.min(tonumber(tAmount) or 0, tSelected.count)
-        if n > 0 then withdraw(tSelected, n) end
-        tMode = "browse"
-        buildIndex(); applyFilter()
-        drawTerminal(); drawStats()        -- refresh both after a withdraw
+
+    elseif uiTab == "search" then
+      if tMode == "browse" then
+        if code == keys.backspace then query = query:sub(1, -2); applyFilter(); tSel = 1
+        elseif code == keys.up then tSel = math.max(1, tSel - 1)
+        elseif code == keys.down then tSel = math.min(#filtered, tSel + 1)
+        elseif code == keys.enter then
+          local sel = filtered[tSel]
+          if sel then tSelected = sel; tAmount = tostring(math.min(64, sel.count)); tMode = "amount" end
+        end
+        drawTerminal()
+      elseif tMode == "amount" then
+        if code == keys.backspace then tAmount = tAmount:sub(1, -2); drawTerminal()
+        elseif code == keys.escape then tMode = "browse"; drawTerminal()
+        elseif code == keys.enter then
+          local n = math.min(tonumber(tAmount) or 0, tSelected.count)
+          if n > 0 then withdraw(tSelected, n) end
+          tMode = "browse"
+          buildIndex(); applyFilter()
+          drawTerminal(); drawStats()        -- refresh both after a withdraw
+        end
+      end
+
+    elseif uiTab == "craft" and meOk then
+      if cMode == "browse" then
+        if code == keys.backspace then cQuery = cQuery:sub(1, -2); applyCraftFilter(); cSel = 1
+        elseif code == keys.up then cSel = math.max(1, cSel - 1)
+        elseif code == keys.down then cSel = math.min(#cFiltered, cSel + 1)
+        elseif code == keys.enter then
+          local sel = cFiltered[cSel]
+          if sel then cSelected = sel; cAmount = "1"; cMode = "amount" end
+        end
+        drawTerminal()
+      elseif cMode == "amount" then
+        if code == keys.backspace then cAmount = cAmount:sub(1, -2); drawTerminal()
+        elseif code == keys.escape then cMode = "browse"; drawTerminal()
+        elseif code == keys.enter then
+          local n = math.max(1, tonumber(cAmount) or 0)
+          local success, err = requestCraft(cSelected, n)
+          if success then
+            cStatusMsg = ("Queued %d x %s"):format(n, cSelected.displayName)
+            craftPollTimer = os.startTimer(CRAFT_POLL_INTERVAL)
+          else
+            cStatusMsg = "Craft failed: " .. tostring(err or "unknown error")
+            craftPollTimer = nil
+          end
+          cMode = "status"
+          drawTerminal()
+        end
+      elseif cMode == "status" then
+        if code == keys.enter or code == keys.escape then
+          cMode = "browse"; buildCraftIndex(); applyCraftFilter(); drawTerminal()
+        end
       end
     end
 
