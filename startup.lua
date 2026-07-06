@@ -909,9 +909,12 @@ while true do
     drawTerminal()
 
   elseif e1 == "key" then
+    -- Wrapped in pcall so a bad withdraw/craft (stale location data, a
+    -- peripheral hiccup, etc.) can't crash the whole program and silently
+    -- kill the import-timer loop along with it - it shows as an error on
+    -- the Search tab instead, and everything else keeps running.
+    local keyOk, keyErr = pcall(function()
     local code = ev[2]
-    -- Minecraft eats Escape and most F-keys before they reach the computer,
-    -- so cancel uses [C] and tabs cycle with Left/Right instead of hotkeys.
     if code == keys.left or code == keys.right then
       local canSwitch = (uiTab == "search" and tMode == "browse")
         or (uiTab == "craft" and cMode == "browse")
@@ -935,8 +938,11 @@ while true do
         if code == keys.backspace then tAmount = tAmount:sub(1, -2); drawTerminal()
         elseif code == keys.c then tMode = "browse"; drawTerminal()
         elseif code == keys.enter then
-          local n = math.min(tonumber(tAmount) or 0, tSelected.count)
-          if n > 0 then withdraw(tSelected, n) end
+          -- Re-fetch by key: the auto-import timer may have rebuilt the
+          -- index (and moved items around) since this entry was selected.
+          local fresh = findEntry(tSelected.key) or tSelected
+          local n = math.min(tonumber(tAmount) or 0, fresh.count)
+          if n > 0 then withdraw(fresh, n) end
           tMode = "browse"
           buildIndex(); applyFilter()
           drawTerminal(); drawStats()        -- refresh both after a withdraw
@@ -986,6 +992,8 @@ while true do
         drawTerminal()
       end
     end
+    end)
+    if not keyOk then lastErr = tostring(keyErr); drawTerminal() end
 
   elseif e1 == "redstone" then
     -- A comparator on the INPUT barrel pulses redstone when items arrive,
