@@ -8,18 +8,30 @@
   turtle, listens for requests from the main storage computer over rednet,
   and does the actual crafting/inventory-reading locally.
 
-  Needs a modem (wired or wireless) attached to the turtle, on the same
-  network as the main storage computer (wired is simplest - just connect it
-  into the same Networking Cable run as your storage chests).
+  Needs BOTH: a modem for rednet messaging (wired or wireless - either
+  works), AND a Wired Modem specifically attached to the turtle and joined
+  to the same wired network as the storage chests, so the main computer can
+  push ingredients into this turtle's inventory by name. A wireless modem
+  alone lets messages through but does NOT make the turtle's inventory
+  network-addressable - the two are separate things.
+
+  Note: wired modems aren't a turtle "upgrade" you craft/equip - place one
+  by right-clicking it onto an outer face of the turtle, the same way you'd
+  attach one to a chest.
 --------------------------------------------------------------------------- ]]
 
 local PROTO, HOST = "cg_turtle", "craftbot"
 
-local modem = peripheral.find("modem")
-if not modem then
+local opened = false
+for _, name in ipairs(peripheral.getNames()) do
+  if peripheral.getType(name) == "modem" then
+    rednet.open(name)
+    opened = true
+  end
+end
+if not opened then
   error("No modem attached. Attach a Wired or Wireless Modem to this turtle.", 0)
 end
-rednet.open(peripheral.getName(modem))
 rednet.host(PROTO, HOST)
 
 term.clear(); term.setCursorPos(1, 1)

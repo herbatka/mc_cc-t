@@ -34,13 +34,20 @@ main computer talks to it over rednet.
 3. Attach a **Wired Modem** to the turtle and connect it into the *same*
    wired network your sophisticatedstorage chests are already on
    (Networking Cable, or place it directly touching another wired modem
-   that's part of that network). This is required for two reasons: it lets
-   the main computer push ingredients into the turtle's inventory by name,
-   and it lets the turtle's helper program talk to the main computer over
-   rednet. Being merely adjacent to the computer isn't enough — a bare side
-   like "bottom" isn't a network-addressable name other peripherals can
-   target, which is the "Target 'bottom' does not exist" error you'd get
-   without this step.
+   that's part of that network). A wireless modem is fine too (or in
+   addition) for the rednet messaging part, but the *wired* connection is
+   what actually matters here: it's what lets the main computer push
+   ingredients into the turtle's inventory by name. Wireless modems only
+   carry rednet messages - they don't join the shared peripheral network
+   that `pushItems` needs.
+
+   Important: a wired modem is **not** a turtle upgrade you craft/equip
+   like the Crafting Table. Just right-click the Wired Modem item onto an
+   outer face of the turtle, the same way you'd attach one to a chest - it
+   doesn't use up an upgrade slot. Being merely adjacent to the computer
+   isn't enough either - a bare side name like "bottom" isn't a
+   network-addressable name other peripherals can target, which is the
+   "Target 'bottom' does not exist" error you'd get without this step.
 4. Copy `turtle_craft.lua` onto the turtle and save it as the turtle's own
    **`startup.lua`**, then reboot the turtle so it runs automatically. It
    just sits there listening for requests — you don't interact with it
