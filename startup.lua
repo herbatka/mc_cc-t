@@ -61,15 +61,17 @@ if #storages == 0 then error("No sophisticatedstorage chests found.", 0) end
 -- Optional: a turtle equipped with a Crafting Table powers the Craft tab.
 -- It's independent of AE2/ME systems entirely - it's just a real turtle
 -- crafting real items using your existing sophisticatedstorage chests.
--- NOTE: a turtle can't join a wired network or be addressed by pushItems at
--- all - a peripheral-wrapped turtle only exposes remote power control
--- (on/off/reboot). Actual crafting, and moving items in/out of the turtle,
--- is done by turtle_craft.lua running ON the turtle, which this computer
--- talks to over rednet (see TURTLE_PROTO below) and which stages items
--- through TURTLE_STAGING using turtle.suck()/turtle.drop().
-local craftTurtle = peripheral.find("turtle")
+-- NOTE: the turtle is effectively its own separate computer - it doesn't
+-- need to be anywhere near this one, isn't detected as a peripheral, and
+-- can't join a wired network at all. All crafting, and moving items in/out
+-- of the turtle, is done by turtle_craft.lua running ON the turtle, which
+-- this computer talks to purely over rednet (see TURTLE_PROTO below) and
+-- which stages items through TURTLE_STAGING using turtle.suck()/turtle.drop().
+-- The only thing THIS computer needs directly is the staging barrel itself
+-- (it has to be on the same storage network so pushItems/absorb can reach
+-- it) - turtle reachability is checked live, per request, over rednet.
 local TURTLE_PROTO, TURTLE_HOST = "cg_turtle", "craftbot"
-local turtleOk = craftTurtle ~= nil and peripheral.isPresent(TURTLE_STAGING)
+local turtleOk = peripheral.isPresent(TURTLE_STAGING)
 
 -- Open rednet on every modem present: a wireless one enables the pocket
 -- remote, a wired one lets us reach the crafting turtle's helper program
@@ -103,12 +105,8 @@ local cIndex, cFiltered = {}, {}
 local cQuery = ""
 local cMode, cSel, cScroll, cSelected, cAmount = "browse", 1, 1, nil, ""
 local cPlan, cCycles, cShort = {}, 1, false
-local cStatusMsg
-if not craftTurtle then
-  cStatusMsg = "No turtle found - attach one to craft."
-elseif not peripheral.isPresent(TURTLE_STAGING) then
-  cStatusMsg = "No staging barrel found at " .. TURTLE_STAGING .. " (see README)."
-end
+local cStatusMsg = turtleOk and nil
+  or ("No staging barrel found at " .. TURTLE_STAGING .. " (see README).")
 
 local function keyOf(item) return item.name .. "|" .. (item.nbt or "") end
 
@@ -781,7 +779,7 @@ local function handleRemote(sender, msg)
     rednet.send(sender, { ok = true, items = out, total = #matches }, REMOTE_PROTO)
 
   elseif msg.cmd == "craftPlan" then
-    if not turtleOk then rednet.send(sender, { ok = false, err = "no turtle" }, REMOTE_PROTO); return end
+    if not turtleOk then rednet.send(sender, { ok = false, err = "no staging barrel" }, REMOTE_PROTO); return end
     local recipe = recipesByOutput[msg.output]
     if not recipe then rednet.send(sender, { ok = false, err = "unknown recipe" }, REMOTE_PROTO); return end
     local n = math.max(1, tonumber(msg.amount) or recipe.yield)
@@ -794,7 +792,7 @@ local function handleRemote(sender, msg)
     rednet.send(sender, { ok = true, cycles = cycles, produced = cycles * recipe.yield, plan = out, short = short }, REMOTE_PROTO)
 
   elseif msg.cmd == "craftRequest" then
-    if not turtleOk then rednet.send(sender, { ok = false, err = "no turtle" }, REMOTE_PROTO); return end
+    if not turtleOk then rednet.send(sender, { ok = false, err = "no staging barrel" }, REMOTE_PROTO); return end
     local recipe = recipesByOutput[msg.output]
     if not recipe then rednet.send(sender, { ok = false, err = "unknown recipe" }, REMOTE_PROTO); return end
     local n = math.max(1, tonumber(msg.amount) or recipe.yield)
