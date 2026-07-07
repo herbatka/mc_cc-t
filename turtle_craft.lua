@@ -46,8 +46,10 @@ while true do
       rednet.send(sender, { ok = ok, err = err }, PROTO)
 
     elseif msg.cmd == "snapshot" then
+      -- The `detailed` flag is required to get displayName/tags/etc; without
+      -- it, turtle.getItemDetail only returns {name, count}.
       local slots = {}
-      for i = 1, 16 do slots[i] = turtle.getItemDetail(i) end
+      for i = 1, 16 do slots[i] = turtle.getItemDetail(i, true) end
       rednet.send(sender, { ok = true, slots = slots }, PROTO)
 
     elseif msg.cmd == "loadSlot" then

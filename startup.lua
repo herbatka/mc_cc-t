@@ -331,7 +331,13 @@ end
 local function rebuildRecipes()
   recipesByOutput = {}
   for _, r in ipairs(BUILTIN_RECIPES) do recipesByOutput[r.output] = r end
-  for _, r in ipairs(customRecipes) do recipesByOutput[r.output] = r end
+  for _, r in ipairs(customRecipes) do
+    -- Guard against old/corrupt recipes.db entries (e.g. saved before a fix
+    -- to how the turtle's output display name was captured) so a bad file
+    -- on disk can never crash startup - just falls back to the item id.
+    if r.output and not r.displayName then r.displayName = r.output end
+    if r.output then recipesByOutput[r.output] = r end
+  end
   recipes = {}
   for _, r in pairs(recipesByOutput) do recipes[#recipes + 1] = r end
   table.sort(recipes, function(a, b) return a.displayName:lower() < b.displayName:lower() end)
@@ -503,10 +509,10 @@ local function performTeach()
     local b, a = before[i], after[i]
     if a then
       if not b or b.name ~= a.name then
-        outputName, outputDisplay, outputYield = a.name, a.displayName, a.count
+        outputName, outputDisplay, outputYield = a.name, a.displayName or a.name, a.count
         break
       elseif a.count > b.count then
-        outputName, outputDisplay, outputYield = a.name, a.displayName, a.count - b.count
+        outputName, outputDisplay, outputYield = a.name, a.displayName or a.name, a.count - b.count
         break
       end
     end
