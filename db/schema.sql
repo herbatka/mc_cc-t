@@ -42,3 +42,47 @@ CREATE TABLE IF NOT EXISTS tags (
 );
 
 CREATE INDEX IF NOT EXISTS tags_tag_idx ON tags (tag);
+
+-- Given a recipe id, returns each grid position with the total count needed
+-- and the full list of concrete item ids that would satisfy it (a single
+-- item if the ingredient there is a plain item, or the tag's whole
+-- membership if it's a tag). This is what the CC:Tweaked side actually
+-- calls (via PostgREST's /rpc/ endpoint) - it does the item/tag resolution
+-- so the Lua side never needs to know the difference.
+CREATE OR REPLACE FUNCTION recipe_ingredients_resolved(p_recipe_id text)
+RETURNS TABLE(grid_pos smallint, needed_count integer, candidates text[]) AS $$
+  SELECT
+    ri.grid_pos,
+    max(ri.count) AS needed_count,
+    array_agg(DISTINCT candidate) AS candidates
+  FROM recipe_ingredients ri
+  LEFT JOIN LATERAL (
+    SELECT CASE WHEN ri.kind = 'item' THEN ri.ref ELSE t.item END AS candidate
+    FROM (SELECT 1) dummy
+    LEFT JOIN tags t ON ri.kind = 'tag' AND t.tag = ri.ref
+  ) c ON true
+  WHERE ri.recipe_id = p_recipe_id
+  GROUP BY ri.grid_pos
+  ORDER BY ri.grid_pos;
+$$ LANGUAGE sql STABLE;
+
+-- PostgREST connects as `authenticator` and switches to `web_anon` for
+-- unauthenticated requests (there's no auth here - the API only ever
+-- exposes read-only recipe data, nothing sensitive or writable).
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'web_anon') THEN
+    CREATE ROLE web_anon NOLOGIN;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'authenticator') THEN
+    -- CHANGE THIS PASSWORD before deploying anywhere reachable off-box.
+    CREATE ROLE authenticator NOINHERIT LOGIN PASSWORD 'change-me';
+  END IF;
+END $$;
+
+GRANT web_anon TO authenticator;
+GRANT USAGE ON SCHEMA public TO web_anon;
+GRANT SELECT ON recipes, recipe_ingredients, tags TO web_anon;
+GRANT EXECUTE ON FUNCTION recipe_ingredients_resolved(text) TO web_anon;

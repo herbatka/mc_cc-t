@@ -1,0 +1,17 @@
+[Unit]
+Description=PostgREST API for the crafting recipe database
+After=postgresql.service
+Wants=postgresql.service
+
+[Service]
+# Adjust these two paths to wherever you extracted the binary + placed the config.
+ExecStart=/opt/postgrest/postgrest /opt/postgrest/postgrest.conf
+Restart=on-failure
+RestartSec=5
+# ~20MB idle; this caps it well above that in case of a runaway query, without
+# letting it fight the Minecraft server for memory under any real load.
+MemoryMax=256M
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

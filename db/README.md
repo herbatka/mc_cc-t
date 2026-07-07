@@ -37,6 +37,43 @@ modpack (e.g. after an update changes recipes).
   `(recipe_id, grid_pos)` mean any of them is an acceptable ingredient there.
 - `tags` - `(tag, item)` membership pairs, only for tags actually referenced
   by the recipe dump (not every tag in the game).
+- `recipe_ingredients_resolved(recipe_id)` - a SQL function; given a recipe
+  id, returns each grid position with the count needed and the full list of
+  concrete item ids that would satisfy it (a tag's entire membership, if
+  that slot is tag-based). This is what the CC:Tweaked side actually calls -
+  it never needs to know whether a slot was an item or a tag.
+
+## API (PostgREST)
+
+The CC:Tweaked computer only speaks HTTP, not SQL, so [PostgREST](https://postgrest.org)
+sits in front of Postgres and turns the schema above into a REST API with
+**no custom application code** - verified running at ~17MB RSS idle, which
+matters given the Minecraft server is competing for the same box's RAM.
+
+1. Download the Linux static x64/arm64 build from
+   https://github.com/PostgREST/postgrest/releases/latest (it's a single
+   self-contained binary, no runtime dependencies - `tar xJf postgrest-*.tar.xz`).
+2. Apply the roles/grants at the bottom of `schema.sql` (already included if
+   you ran `import_recipes.py`, which re-applies `schema.sql` every time) -
+   **change the `authenticator` role's password** from the placeholder.
+3. Copy `postgrest.conf`, fill in the real `db-uri` (matching that password
+   and your database name), and place it next to the binary.
+4. Copy `postgrest.service` to `/etc/systemd/system/`, fix the two paths in
+   `ExecStart`, then `systemctl enable --now postgrest`.
+
+`postgrest.conf` binds to `127.0.0.1` only (not exposed on the LAN) since
+the API and the Minecraft server run on the same box - the CC:Tweaked side
+calls `http://127.0.0.1:3001/...`, which is the Java process itself making an
+outbound loopback request, not a real network hop. You'll still need to add
+`127.0.0.1` to CC:Tweaked's `http.rules` allowlist in
+`computercraft-server.toml`, since it blocks private/loopback addresses by
+default as an anti-SSRF measure.
+
+Example calls (what the Lua side will use):
+```
+GET  /recipes?craftable=eq.true&output_item=ilike.*chest*&select=id,output_item,output_count
+POST /rpc/recipe_ingredients_resolved   {"p_recipe_id": "minecraft:chest"}
+```
 
 ## Notes
 
@@ -47,3 +84,10 @@ modpack (e.g. after an update changes recipes).
   differs from what's in `output_item` - `output_item`/`output_count` are
   just `result.id`/`result.count` from the recipe JSON, good enough for our
   turtle-craftable subset.
+- **Multiple recipes can produce the same output item.** E.g. `minecraft:chest`
+  has 5 different craftable recipes in this modpack (vanilla, Aether's
+  skyroot variant, a Modern Industrialization batch recipe, etc.). The Craft
+  tab needs to treat search results as a list of *recipes*, not items - more
+  than one row can share the same output/display name, and the player picks
+  the specific recipe variant they want, same as picking between storage
+  entries today.
