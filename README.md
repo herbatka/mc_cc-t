@@ -13,18 +13,28 @@ computer program ever sees them, so this UI avoids both entirely.
 
 - **Search** — unchanged: type to search your sophisticatedstorage chests,
   Up/Down to pick, Enter to withdraw an amount.
-- **Craft** — type the name of a known recipe, Up/Down to pick a match,
-  Enter to set a quantity. It then shows the exact ingredient list — what's
-  needed and what you're short on — before you commit. If everything's in
-  stock, Enter crafts it for real using a turtle, and the crafted item is
-  delivered to OUTPUT (same chest withdrawals go to) so it's waiting for
-  you to collect. Any leftover ingredients (e.g. if a craft fails partway)
-  go back into general storage instead.
+- **Craft** — type a name, Enter to search (a full recipe database over
+  HTTP - see `db/`, plus anything you've taught locally), Up/Down to pick a
+  match, Enter to select, then type a quantity. It shows the exact
+  ingredient list — what's needed and what you're short on — before you
+  commit. If everything's in stock, Enter crafts it for real using a
+  turtle, and the crafted item is delivered to OUTPUT (same chest
+  withdrawals go to) so it's waiting for you to collect. Any leftover
+  ingredients (e.g. if a craft fails partway) go back into general storage
+  instead. Since a single item can have several different recipes (e.g. a
+  vanilla chest vs. a modded variant), search results show each recipe
+  separately, tagged with which mod it's from (`[minecraft]`, `[aether]`,
+  etc.) so you can tell them apart.
 - **Teach** — arrange ingredients in the turtle's crafting grid yourself,
-  then Enter to learn the recipe for real (see below).
+  then Enter to learn the recipe for real (see below). Useful for anything
+  not in the database (custom NBT variants, a mod added after the last
+  database export).
 
 No AE2/ME system involved — this is entirely self-contained, using your
-existing sophisticatedstorage chests plus one crafting turtle.
+existing sophisticatedstorage chests plus one crafting turtle plus a small
+Postgres + PostgREST database on the same box (see `db/README.md` for the
+full setup walkthrough - recipe search won't return anything without it,
+though locally-taught recipes still work fine either way).
 
 ### Setting up the Craft tab
 
@@ -61,22 +71,22 @@ between it and the main computer happens over rednet plus a shared barrel:
    directly.
 6. Reboot the main computer so it picks up the barrel fresh.
 
-That's it — the Craft tab now works with the ~24 built-in recipes (sticks,
-torches, crafting table, chest, furnace, ladder, bucket, shears, flint and
-steel, plus the full wood/stone/iron pickaxe/axe/shovel/hoe/sword set).
+That, plus the recipe database from `db/README.md` reachable at `API_BASE`
+in `startup.lua` (default `http://127.0.0.1:3001`), is the whole Craft tab.
 
-The only thing the main computer checks directly is the staging barrel
-(it needs that on its own network to push ingredients/absorb output) - if
-that's missing, the Craft tab says so and the Search tab keeps working
-exactly as before. Turtle reachability itself is checked live, per
-request, over rednet: if `turtle_craft.lua` isn't running or isn't
-reachable, attempting to craft or teach shows a clear "turtle helper not
-found" error instead of hanging.
+The only thing the main computer checks directly at boot is the staging
+barrel (it needs that on its own network to push ingredients/absorb
+output) - if that's missing, the Craft tab says so and the Search tab
+keeps working exactly as before. Turtle reachability and database
+reachability are both checked live, per request, instead: if
+`turtle_craft.lua` isn't running/reachable you get a clear "turtle helper
+not found" error, and if the database is unreachable, search just falls
+back to whatever you've taught locally instead of hanging or crashing.
 
 ### Teaching new recipes
 
-For anything not in the built-in list (modded items, other tool tiers,
-whatever), teach it directly:
+For anything not in the database (modded items added after the last
+export, custom NBT variants, etc.), teach it directly:
 
 1. Switch to the **Teach** tab (Left/Right).
 2. Physically place the ingredients into the turtle's crafting grid — the
@@ -91,10 +101,11 @@ whatever), teach it directly:
    any leftover ingredients) straight into storage.
 
 Taught recipes only remember the exact item names you used (e.g. "spruce
-planks", not "any planks"). If you want to correct a built-in recipe to use
-a specific wood/material you have on hand, just teach it again with your
-own ingredients — taught recipes override built-ins with the same output.
+planks", not "any planks" or a tag). They show up in Craft tab search
+results alongside whatever the database finds, not instead of it - both
+sources are searched every time, so you'll see your own taught version and
+any database recipes for the same item side by side.
 
 Note: teaching has to happen at the main computer, since it needs the
 turtle physically in front of you. The pocket remote can search and craft
-anything already known, but can't teach.
+anything already known (locally taught or in the database), but can't teach.

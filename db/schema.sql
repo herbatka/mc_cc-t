@@ -43,6 +43,19 @@ CREATE TABLE IF NOT EXISTS tags (
 
 CREATE INDEX IF NOT EXISTS tags_tag_idx ON tags (tag);
 
+-- What the CC:Tweaked side actually searches against. Plain SELECT ...
+-- LIMIT with no ORDER BY is not deterministic in Postgres - with hundreds
+-- of matches for a common word like "chest", repeating the exact same
+-- search could return a different arbitrary subset each time, sometimes
+-- missing the obvious/canonical recipe entirely. output_len lets shorter,
+-- more-canonical item ids (e.g. "minecraft:chest") sort before verbose
+-- modded variants, and gives PostgREST's ?order= param a real column to
+-- sort by (it only orders by columns, not arbitrary expressions).
+CREATE OR REPLACE VIEW recipes_search AS
+  SELECT id, type, craftable, output_item, output_count, length(output_item) AS output_len
+  FROM recipes
+  WHERE craftable;
+
 -- Given a recipe id, returns each grid position with the total count needed
 -- and the full list of concrete item ids that would satisfy it (a single
 -- item if the ingredient there is a plain item, or the tag's whole
@@ -84,5 +97,5 @@ END $$;
 
 GRANT web_anon TO authenticator;
 GRANT USAGE ON SCHEMA public TO web_anon;
-GRANT SELECT ON recipes, recipe_ingredients, tags TO web_anon;
+GRANT SELECT ON recipes, recipe_ingredients, tags, recipes_search TO web_anon;
 GRANT EXECUTE ON FUNCTION recipe_ingredients_resolved(text) TO web_anon;

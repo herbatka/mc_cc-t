@@ -297,7 +297,7 @@ while true do
         elseif k == keys.c then cMode = "list"
         elseif k == keys.enter then
           local n = math.max(1, tonumber(camountStr) or cSelected.yield)
-          local r = req({ cmd = "craftPlan", output = cSelected.output, amount = n })
+          local r = req({ cmd = "craftPlan", key = cSelected.key, amount = n })
           if r and r.ok then
             cPlan, cCycles, cShort, cProduced = r.plan, r.cycles, r.short, r.produced
             cMode = "confirm"
@@ -310,7 +310,7 @@ while true do
         if k == keys.c then cMode = "list"
         elseif k == keys.enter and not cShort then
           cstatus = "Crafting..."; draw()
-          local r = req({ cmd = "craftRequest", output = cSelected.output, amount = cProduced }, 10)
+          local r = req({ cmd = "craftRequest", key = cSelected.key, amount = cProduced }, 10)
           if r and r.ok then cstatus = ("Crafted %d x %s"):format(r.produced or cProduced, cSelected.displayName)
           else cstatus = "Craft failed: " .. tostring((r and r.err) or "no response") end
           cMode = "status"
