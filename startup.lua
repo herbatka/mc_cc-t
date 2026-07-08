@@ -112,7 +112,7 @@ local refreshBtn = nil        -- clickable area for the monitor REFRESH button
 local cFiltered = {}
 local cQuery = ""
 local cMode, cSel, cScroll, cSelected, cAmount = "search", 1, 1, nil, ""
-local cPlan, cSummary, cCycles, cShort = {}, {}, 1, false
+local cPlan, cSummary, cCycles, cShort, cHasSub = {}, {}, 1, false, false
 local cStatusMsg = turtleOk and nil
   or ("No staging barrel found at " .. TURTLE_STAGING .. " (see README).")
 
@@ -288,6 +288,18 @@ local function apiSearchRecipes(query, limit)
     .. "&order=output_len.asc,output_item.asc&limit=%d")
     :format(urlEncode("*" .. query .. "*"), limit or 30)
   return apiGet(path)
+end
+
+-- Given a concrete item id, finds the best craftable recipe that produces
+-- it exactly (if any) - used to offer "craft the missing ingredient too"
+-- when a craft comes up short. This is a lookup, not user-facing search,
+-- so it's an exact match rather than ilike.
+local function apiFindRecipeForItem(itemName)
+  local path = ("/recipes_search?output_item=eq.%s&select=id,output_item,output_count"
+    .. "&order=output_len.asc,output_item.asc&limit=1"):format(urlEncode(itemName))
+  local rows, err = apiGet(path)
+  if not rows or #rows == 0 then return nil end
+  return rows[1]
 end
 
 -- Fetches the concrete item membership of one or more tags in a single
@@ -530,7 +542,11 @@ end
 -- Executes an already-validated plan: stages + loads ingredients one
 -- distinct item at a time, crafts, then delivers the output to OUTPUT (or
 -- banks leftovers back to storage, on failure) via the staging barrel.
-local function runCraft(recipe, cycles, plan)
+-- keepInStorage: bank the crafted output into general storage instead of
+-- routing it to OUTPUT. Used for the one-level auto-craft-missing-ingredient
+-- flow below, where the "output" is really just an intermediate ingredient
+-- for the craft the player actually asked for.
+local function runCraft(recipe, cycles, plan, keepInStorage)
   local groups, order = {}, {}
   for _, p in ipairs(plan) do
     if not groups[p.name] then groups[p.name] = {}; order[#order + 1] = p.name end
@@ -553,9 +569,48 @@ local function runCraft(recipe, cycles, plan)
   end
 
   local craftOk, craftErr = turtleCraft(cycles)
-  collectFromTurtle(craftOk and recipe.output or nil)
+  collectFromTurtle((craftOk and not keepInStorage) and recipe.output or nil)
 
   return craftOk, craftErr
+end
+
+-- One level of auto-resolution only: for each short ingredient, checks
+-- whether it has its own craftable recipe AND that recipe's ingredients are
+-- fully in stock right now. If the sub-recipe is itself short, it's left
+-- alone rather than chasing a bigger tree - keeps this predictable instead
+-- of silently kicking off a long chain of crafts the player didn't see.
+local function findSubCrafts(summary)
+  for _, t in ipairs(summary) do
+    if t.short > 0 then
+      local row = apiFindRecipeForItem(t.name)
+      if row then
+        local subRecipe = makeRecipeEntry(row)
+        local grid = resolveRecipeGrid(subRecipe)
+        if grid then
+          local subCycles = math.max(1, math.ceil(t.short / subRecipe.yield))
+          local subPositions, _, subShort = planCraft(subRecipe, subCycles)
+          if not subShort then
+            t.sub = { recipe = subRecipe, cycles = subCycles, positions = subPositions }
+          end
+        end
+      end
+    end
+  end
+end
+
+-- Crafts every short ingredient's resolved sub-craft first (banked to
+-- storage, not OUTPUT), then re-plans against the now-updated stock and
+-- runs the craft the player actually asked for.
+local function craftResolvingShort(recipe, cycles, summary)
+  for _, t in ipairs(summary) do
+    if t.sub then
+      local ok, err = runCraft(t.sub.recipe, t.sub.cycles, t.sub.positions, true)
+      if not ok then return false, "couldn't craft " .. labelFor(t.name) .. ": " .. tostring(err) end
+    end
+  end
+  local positions, _, short = planCraft(recipe, cycles)
+  if short then return false, "still missing ingredients after auto-crafting" end
+  return runCraft(recipe, cycles, positions)
 end
 
 ---------------------------------------------------------------------------
@@ -737,13 +792,18 @@ local function drawCraftConfirm(tw)
     term.setCursorPos(1, y)
     term.setTextColor(t.short > 0 and colors.red or colors.lightGray)
     local line = ("%-16s need %3d  have %3d"):format(labelFor(t.name):sub(1, 16), t.needed, t.available)
-    if t.short > 0 then line = line .. "  SHORT " .. t.short end
+    if t.short > 0 then
+      line = line .. "  SHORT " .. t.short
+      if t.sub then line = line .. " *" end
+    end
     term.write(line:sub(1, tw))
     y = y + 1
   end
   term.setCursorPos(1, y + 1); term.setTextColor(colors.lightGray)
   if cShort then
-    term.write("Missing ingredients above.  [C] cancel")
+    term.write((cHasSub and "* = craftable" or "Missing ingredients above."):sub(1, tw))
+    term.setCursorPos(1, y + 2)
+    term.write((cHasSub and "[S] craft missing + this   [C] cancel" or "[C] cancel"):sub(1, tw))
   else
     term.write("[Enter] craft it   [C] cancel")
   end
@@ -833,11 +893,16 @@ local function handleRemote(sender, msg)
     local n = math.max(1, tonumber(msg.amount) or recipe.yield)
     local cycles = math.max(1, math.min(64, math.ceil(n / recipe.yield)))
     local _, summary, short = planCraft(recipe, cycles)
-    local out = {}
+    if short then findSubCrafts(summary) end
+    local out, hasSub = {}, false
     for _, t in ipairs(summary) do
-      out[#out + 1] = { label = labelFor(t.name), needed = t.needed, available = t.available, short = t.short }
+      local craftable = t.sub ~= nil
+      if craftable then hasSub = true end
+      out[#out + 1] = { label = labelFor(t.name), needed = t.needed, available = t.available,
+        short = t.short, craftable = craftable }
     end
-    rednet.send(sender, { ok = true, cycles = cycles, produced = cycles * recipe.yield, plan = out, short = short }, REMOTE_PROTO)
+    rednet.send(sender, { ok = true, cycles = cycles, produced = cycles * recipe.yield,
+      plan = out, short = short, hasSub = hasSub }, REMOTE_PROTO)
 
   elseif msg.cmd == "craftRequest" then
     if not turtleOk then rednet.send(sender, { ok = false, err = "no staging barrel" }, REMOTE_PROTO); return end
@@ -847,9 +912,16 @@ local function handleRemote(sender, msg)
     if not grid then rednet.send(sender, { ok = false, err = gerr }, REMOTE_PROTO); return end
     local n = math.max(1, tonumber(msg.amount) or recipe.yield)
     local cycles = math.max(1, math.min(64, math.ceil(n / recipe.yield)))
-    local positions, _, short = planCraft(recipe, cycles)
-    if short then rednet.send(sender, { ok = false, err = "missing ingredients" }, REMOTE_PROTO); return end
-    local success, err = runCraft(recipe, cycles, positions)
+    local positions, summary, short = planCraft(recipe, cycles)
+    local success, err
+    if short and msg.auto then
+      findSubCrafts(summary)
+      success, err = craftResolvingShort(recipe, cycles, summary)
+    elseif short then
+      rednet.send(sender, { ok = false, err = "missing ingredients" }, REMOTE_PROTO); return
+    else
+      success, err = runCraft(recipe, cycles, positions)
+    end
     rednet.send(sender, { ok = success, err = err, produced = cycles * recipe.yield }, REMOTE_PROTO)
   end
 end
@@ -990,6 +1062,9 @@ while true do
           local n = math.max(1, tonumber(cAmount) or cSelected.yield)
           cCycles = math.max(1, math.min(64, math.ceil(n / cSelected.yield)))
           cPlan, cSummary, cShort = planCraft(cSelected, cCycles)
+          if cShort then findSubCrafts(cSummary) end
+          cHasSub = false
+          for _, t in ipairs(cSummary) do if t.sub then cHasSub = true end end
           cMode = "confirm"
           drawTerminal()
         end
@@ -997,6 +1072,15 @@ while true do
         if code == keys.c then cMode = "list"; drawTerminal()
         elseif code == keys.enter and not cShort then
           local success, err = runCraft(cSelected, cCycles, cPlan)
+          cStatusMsg = success
+            and ("Crafted %d x %s"):format(cCycles * cSelected.yield, cSelected.displayName)
+            or ("Craft failed: " .. tostring(err or "unknown error"))
+          cMode = "status"
+          drawTerminal()
+        elseif code == keys.s and cShort and cHasSub then
+          cStatusMsg = "Crafting missing ingredients..."
+          drawTerminal()
+          local success, err = craftResolvingShort(cSelected, cCycles, cSummary)
           cStatusMsg = success
             and ("Crafted %d x %s"):format(cCycles * cSelected.yield, cSelected.displayName)
             or ("Craft failed: " .. tostring(err or "unknown error"))

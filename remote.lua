@@ -62,7 +62,7 @@ local csel, cscroll = 1, 1
 local camountStr = ""
 local cstatus    = "Type a name, Enter to search"
 local cSelected  = nil
-local cPlan, cCycles, cShort, cProduced = {}, 1, false, 0
+local cPlan, cCycles, cShort, cProduced, cHasSub = {}, 1, false, 0, false
 
 local function fetch()
   local r = req({ cmd = "list", query = query, limit = 100 })
@@ -161,12 +161,21 @@ local function drawCraft(w, h)
       term.setCursorPos(1, y)
       term.setTextColor(p.short > 0 and colors.red or colors.lightGray)
       local line = ("%-16s need %3d  have %3d"):format(p.label:sub(1, 16), p.needed, p.available)
-      if p.short > 0 then line = line .. "  SHORT " .. p.short end
+      if p.short > 0 then
+        line = line .. "  SHORT " .. p.short
+        if p.craftable then line = line .. " *" end
+      end
       term.write(line:sub(1, w))
       y = y + 1
     end
     term.setCursorPos(1, y + 1); term.setTextColor(colors.lightGray)
-    term.write((cShort and "Missing ingredients above.  C=back" or "Enter=craft it  C=back"):sub(1, w))
+    if cShort then
+      term.write((cHasSub and "* = craftable" or "Missing ingredients above."):sub(1, w))
+      term.setCursorPos(1, y + 2)
+      term.write((cHasSub and "S=craft missing+this  C=back" or "C=back"):sub(1, w))
+    else
+      term.write("Enter=craft it  C=back")
+    end
     return
   elseif cMode == "status" then
     term.setCursorBlink(false)
@@ -295,7 +304,7 @@ while true do
           local n = math.max(1, tonumber(camountStr) or cSelected.yield)
           local r = req({ cmd = "craftPlan", key = cSelected.key, amount = n })
           if r and r.ok then
-            cPlan, cCycles, cShort, cProduced = r.plan, r.cycles, r.short, r.produced
+            cPlan, cCycles, cShort, cProduced, cHasSub = r.plan, r.cycles, r.short, r.produced, r.hasSub
             cMode = "confirm"
           else
             cstatus = "Plan failed: " .. tostring((r and r.err) or "no response")
@@ -307,6 +316,12 @@ while true do
         elseif k == keys.enter and not cShort then
           cstatus = "Crafting..."; draw()
           local r = req({ cmd = "craftRequest", key = cSelected.key, amount = cProduced }, 10)
+          if r and r.ok then cstatus = ("Crafted %d x %s"):format(r.produced or cProduced, cSelected.displayName)
+          else cstatus = "Craft failed: " .. tostring((r and r.err) or "no response") end
+          cMode = "status"
+        elseif k == keys.s and cShort and cHasSub then
+          cstatus = "Crafting missing ingredients..."; draw()
+          local r = req({ cmd = "craftRequest", key = cSelected.key, amount = cProduced, auto = true }, 15)
           if r and r.ok then cstatus = ("Crafted %d x %s"):format(r.produced or cProduced, cSelected.displayName)
           else cstatus = "Craft failed: " .. tostring((r and r.err) or "no response") end
           cMode = "status"
