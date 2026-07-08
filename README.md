@@ -145,12 +145,20 @@ From then on, `manager.lua`:
   - **Stack sizes are discovered per chest, not assumed.** CC:Tweaked has no
     "what's this slot's real capacity" query, and sophisticatedstorage's
     stack upgrades raise that capacity per chest well past vanilla's 64 -
-    so instead of hardcoding 64 anywhere, each chest's capacity is inferred
-    from the biggest stack actually observed sitting in it (starting at a
-    default of 64 and only ever growing). This means a stack upgrade you
-    add to a chest gets picked up automatically the first time something
-    actually fills past the old high-water mark in that chest - no config
-    needed, and no need to tell it about further upgrades later either.
+    so instead of hardcoding 64 anywhere, each chest's capacity is tracked
+    starting at a default of 64 and only ever growing as more is learned
+    about it (see the active measurement below, and passively any bigger
+    stack rebalancing itself happens to create along the way also counts).
+- **Actively measures real chest capacity** at startup and then every hour
+  (`PROBE_INTERVAL` in `manager.lua`): rather than waiting for a big enough
+  stack to occur naturally, it takes whichever item you currently have the
+  most of and, one chest at a time, piles as much of it as exists anywhere
+  into a single slot there, then reads back what actually landed - directly
+  revealing that chest's true capacity even if it's never held that item
+  before. Nothing is lost in the process (it's the same pushItems moves
+  rebalancing already does), and rebalance() runs right after to put
+  everything back where it actually belongs by rank, since probing
+  deliberately piles things up in a way that ignores rank order.
 - **Tells the main computer** whenever it actually moved something, so the
   main computer's cached view of storage refreshes right away instead of
   waiting for its own periodic resync. The Search tab shows how long ago it

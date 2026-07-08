@@ -13,6 +13,12 @@
        total item ends up filling the first chest(s), the next-highest
        continues right after it, and so on - "chest 1 is all Ancient Stone,
        then Diamond, then Raw Copper, ..." rather than just tidier chaos.
+    3. Actively measuring each chest's real per-slot capacity (stack
+       upgrades push this well past vanilla's 64) at startup and hourly:
+       takes whichever item you have the most of and, one chest at a time,
+       piles as much of it as exists into a single slot there to see what
+       actually lands - much faster than waiting for rebalancing alone to
+       reveal it by chance.
 
   The main computer (startup.lua) never touches INPUT or does this
   consolidation itself anymore - it just gets told over rednet whenever this
@@ -25,6 +31,8 @@
 local INPUT = "minecraft:barrel_2"
 local IMPORT_INTERVAL   = 2     -- seconds: how often INPUT is checked
 local REBALANCE_INTERVAL  = 300   -- seconds: how often to rebalance (5 min)
+local PROBE_INTERVAL = 3600   -- seconds: how often to actively re-measure
+                              -- chest capacities (1 hour) - runs at startup too
 local HEARTBEAT_INTERVAL = 15   -- seconds: "I'm alive" ping even if nothing moved
 -- Default assumed stack capacity per slot before anything's been observed
 -- (matches an un-upgraded vanilla stack) - see chestCapacity below for how
@@ -260,13 +268,92 @@ local function rebalance()
   return moved, unmovable
 end
 
+-- Actively measures every chest's real capacity instead of waiting to
+-- passively observe one during normal rebalancing: takes whichever item
+-- has the highest total count right now (the one most likely to actually
+-- be enough to hit a chest's true ceiling) and, one chest at a time, drags
+-- as much of it as exists anywhere into a single slot there, then reads
+-- back whatever actually landed. Chests get tested in turn using the same
+-- pooled stock, so nothing is lost - it just ends up wherever the last
+-- chest tested could hold it, and rebalance() puts it back where it
+-- actually belongs afterward.
+local function probeCapacities()
+  local seed = scanByKey()
+  local bestKey, bestTotal
+  for key, info in pairs(seed) do
+    if not bestTotal or info.total > bestTotal then bestKey, bestTotal = key, info.total end
+  end
+  if not bestKey then return 0 end   -- nothing in storage yet
+
+  local probed = 0
+  for _, name in ipairs(storages) do
+    local info = scanByKey()[bestKey]
+    if not info then break end
+
+    local targetSlot
+    for _, loc in ipairs(info.locations) do
+      if loc.inv == name then targetSlot = loc.slot; break end
+    end
+    if not targetSlot then
+      local inv = peripheral.wrap(name)
+      local contents = inv.list()
+      for slot = 1, inv.size() do
+        if not contents[slot] then targetSlot = slot; break end
+      end
+    end
+
+    if targetSlot then
+      for _, loc in ipairs(info.locations) do
+        if not (loc.inv == name and loc.slot == targetSlot) then
+          peripheral.wrap(loc.inv).pushItems(name, loc.slot, loc.count, targetSlot)
+        end
+      end
+      local landed = peripheral.wrap(name).list()[targetSlot]
+      local observed = landed and landed.count or 0
+      if observed > (chestCapacity[name] or DEFAULT_STACK_CAP) then
+        chestCapacity[name] = observed
+      end
+      probed = probed + 1
+    end
+  end
+  return probed
+end
+
+-- Probing deliberately piles the test item into whichever chest it's
+-- currently testing, which isn't where that item belongs by rank - so
+-- always follow it with a rebalance() to put things back where they
+-- actually belong, rather than leaving it there until the next scheduled
+-- rebalance (up to REBALANCE_INTERVAL later).
+local function probeThenRebalance()
+  local ok, probed = pcall(probeCapacities)
+  if not ok then
+    print("capacity probe error: " .. tostring(probed))
+    return
+  end
+  if probed > 0 then
+    print(("probed capacity of %d chest(s)"):format(probed))
+  end
+  local rok, moved, unmovable = pcall(rebalance)
+  if rok then
+    if moved > 0 then
+      print(("rebalanced: moved %d item(s), %d stack(s) still waiting on room"):format(moved, unmovable))
+    end
+  else
+    print("rebalance error: " .. tostring(moved))
+  end
+  if probed > 0 or (rok and moved > 0) then notifyMain({ cmd = "storageChanged" }) end
+end
+
 term.clear(); term.setCursorPos(1, 1)
 print("Storage manager running.")
 print(("Watching %d chest(s), importing from %s"):format(#storages, INPUT))
 
-local importTimer   = os.startTimer(IMPORT_INTERVAL)
+probeThenRebalance()   -- measure real chest capacities right away at startup
+
+local importTimer    = os.startTimer(IMPORT_INTERVAL)
 local rebalanceTimer  = os.startTimer(REBALANCE_INTERVAL)
-local heartbeatTimer = os.startTimer(HEARTBEAT_INTERVAL)
+local probeTimer      = os.startTimer(PROBE_INTERVAL)
+local heartbeatTimer  = os.startTimer(HEARTBEAT_INTERVAL)
 
 while true do
   local ev = { os.pullEvent() }
@@ -292,6 +379,10 @@ while true do
         print("rebalance error: " .. tostring(moved))
       end
       rebalanceTimer = os.startTimer(REBALANCE_INTERVAL)
+
+    elseif ev[2] == probeTimer then
+      probeThenRebalance()
+      probeTimer = os.startTimer(PROBE_INTERVAL)
 
     elseif ev[2] == heartbeatTimer then
       notifyMain({ cmd = "heartbeat" })
