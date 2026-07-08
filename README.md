@@ -15,21 +15,25 @@ this UI avoids both entirely.
 - **Craft** — type a name, Enter to search a recipe database over HTTP (see
   `db/`), Up/Down to pick a match, Enter to select, then type a quantity.
   It shows one summarized line per distinct ingredient — total needed vs.
-  what you have — before you commit. If everything's in stock, Enter crafts
-  it for real using a turtle, and the crafted item is delivered to OUTPUT
-  (same chest withdrawals go to) so it's waiting for you to collect. Any
-  leftover ingredients (e.g. if a craft fails partway) go back into general
-  storage instead. Since a single item can have several different recipes
-  (e.g. a vanilla chest vs. a modded variant), search results show each
-  recipe separately, tagged with which mod it's from (`[minecraft]`,
-  `[aether]`, etc.) so you can tell them apart.
+  what you have — before you commit. If everything's in stock, **Enter**
+  crafts it for real using a turtle and banks the crafted item into general
+  storage (same as anything else you've crafted or deposited - use the
+  Search tab to withdraw it same as always). Press **O** instead to send it
+  straight to OUTPUT instead (same chest withdrawals go to), if you want it
+  waiting for you to collect without a separate withdrawal. Any leftover
+  ingredients (e.g. if a craft fails partway) always go back into general
+  storage regardless of which key you used. Since a single item can have
+  several different recipes (e.g. a vanilla chest vs. a modded variant),
+  search results show each recipe separately, tagged with which mod it's
+  from (`[minecraft]`, `[aether]`, etc.) so you can tell them apart.
 - **Missing an ingredient?** If a short ingredient has its own craftable
   recipe *and* that recipe's own ingredients are fully in stock right now,
-  it's marked with a `*` and pressing **S** instead of Enter crafts the
-  missing ingredient(s) first (banked into storage, not sent to OUTPUT —
-  they're not what you asked for), then crafts the item you actually
-  wanted. This only goes one level deep: if the missing ingredient's own
-  recipe is *also* short something, it's shown as missing with no `*` and
+  it's marked with a `*` and pressing **S** instead of Enter/O crafts the
+  missing ingredient(s) first (always banked into storage - they're
+  intermediates, not what you asked for), then crafts the item you
+  actually wanted into storage too. This only goes one level deep: if the
+  missing ingredient's own recipe is *also* short something, it's shown as
+  missing with no `*` and
   no auto-craft option, rather than chasing an arbitrarily deep tree of
   crafts you never approved.
 

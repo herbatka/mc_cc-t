@@ -174,7 +174,9 @@ local function drawCraft(w, h)
       term.setCursorPos(1, y + 2)
       term.write((cHasSub and "S=craft missing+this  C=back" or "C=back"):sub(1, w))
     else
-      term.write("Enter=craft it  C=back")
+      term.write("Enter=store")
+      term.setCursorPos(1, y + 2)
+      term.write("O=output  C=back")
     end
     return
   elseif cMode == "status" then
@@ -316,7 +318,13 @@ while true do
         elseif k == keys.enter and not cShort then
           cstatus = "Crafting..."; draw()
           local r = req({ cmd = "craftRequest", key = cSelected.key, amount = cProduced }, 10)
-          if r and r.ok then cstatus = ("Crafted %d x %s"):format(r.produced or cProduced, cSelected.displayName)
+          if r and r.ok then cstatus = ("Crafted %d x %s (stored)"):format(r.produced or cProduced, cSelected.displayName)
+          else cstatus = "Craft failed: " .. tostring((r and r.err) or "no response") end
+          cMode = "status"
+        elseif k == keys.o and not cShort then
+          cstatus = "Crafting..."; draw()
+          local r = req({ cmd = "craftRequest", key = cSelected.key, amount = cProduced, deliverToOutput = true }, 10)
+          if r and r.ok then cstatus = ("Crafted %d x %s (sent to output)"):format(r.produced or cProduced, cSelected.displayName)
           else cstatus = "Craft failed: " .. tostring((r and r.err) or "no response") end
           cMode = "status"
         elseif k == keys.s and cShort and cHasSub then

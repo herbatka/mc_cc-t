@@ -598,10 +598,12 @@ local function findSubCrafts(summary)
   end
 end
 
--- Crafts every short ingredient's resolved sub-craft first (banked to
--- storage, not OUTPUT), then re-plans against the now-updated stock and
--- runs the craft the player actually asked for.
-local function craftResolvingShort(recipe, cycles, summary)
+-- Crafts every short ingredient's resolved sub-craft first (always banked
+-- to storage regardless of `keepInStorage` - they're intermediates, not
+-- what was actually asked for), then re-plans against the now-updated
+-- stock and runs the craft the player actually asked for, delivering to
+-- storage or OUTPUT per `keepInStorage` same as a direct runCraft call.
+local function craftResolvingShort(recipe, cycles, summary, keepInStorage)
   for _, t in ipairs(summary) do
     if t.sub then
       local ok, err = runCraft(t.sub.recipe, t.sub.cycles, t.sub.positions, true)
@@ -610,7 +612,7 @@ local function craftResolvingShort(recipe, cycles, summary)
   end
   local positions, _, short = planCraft(recipe, cycles)
   if short then return false, "still missing ingredients after auto-crafting" end
-  return runCraft(recipe, cycles, positions)
+  return runCraft(recipe, cycles, positions, keepInStorage)
 end
 
 ---------------------------------------------------------------------------
@@ -805,7 +807,9 @@ local function drawCraftConfirm(tw)
     term.setCursorPos(1, y + 2)
     term.write((cHasSub and "[S] craft missing + this   [C] cancel" or "[C] cancel"):sub(1, tw))
   else
-    term.write("[Enter] craft it   [C] cancel")
+    term.write("[Enter] craft -> storage")
+    term.setCursorPos(1, y + 2)
+    term.write("[O] craft -> output   [C] cancel")
   end
 end
 
@@ -913,14 +917,17 @@ local function handleRemote(sender, msg)
     local n = math.max(1, tonumber(msg.amount) or recipe.yield)
     local cycles = math.max(1, math.min(64, math.ceil(n / recipe.yield)))
     local positions, summary, short = planCraft(recipe, cycles)
+    -- Default is banked to storage - deliverToOutput is an explicit opt-in,
+    -- same as the local UI's Enter (store) vs O (output) keys.
+    local keepInStorage = not msg.deliverToOutput
     local success, err
     if short and msg.auto then
       findSubCrafts(summary)
-      success, err = craftResolvingShort(recipe, cycles, summary)
+      success, err = craftResolvingShort(recipe, cycles, summary, keepInStorage)
     elseif short then
       rednet.send(sender, { ok = false, err = "missing ingredients" }, REMOTE_PROTO); return
     else
-      success, err = runCraft(recipe, cycles, positions)
+      success, err = runCraft(recipe, cycles, positions, keepInStorage)
     end
     rednet.send(sender, { ok = success, err = err, produced = cycles * recipe.yield }, REMOTE_PROTO)
   end
@@ -1071,18 +1078,25 @@ while true do
       elseif cMode == "confirm" then
         if code == keys.c then cMode = "list"; drawTerminal()
         elseif code == keys.enter and not cShort then
-          local success, err = runCraft(cSelected, cCycles, cPlan)
+          local success, err = runCraft(cSelected, cCycles, cPlan, true)
           cStatusMsg = success
-            and ("Crafted %d x %s"):format(cCycles * cSelected.yield, cSelected.displayName)
+            and ("Crafted %d x %s (stored)"):format(cCycles * cSelected.yield, cSelected.displayName)
+            or ("Craft failed: " .. tostring(err or "unknown error"))
+          cMode = "status"
+          drawTerminal()
+        elseif code == keys.o and not cShort then
+          local success, err = runCraft(cSelected, cCycles, cPlan, false)
+          cStatusMsg = success
+            and ("Crafted %d x %s (sent to output)"):format(cCycles * cSelected.yield, cSelected.displayName)
             or ("Craft failed: " .. tostring(err or "unknown error"))
           cMode = "status"
           drawTerminal()
         elseif code == keys.s and cShort and cHasSub then
           cStatusMsg = "Crafting missing ingredients..."
           drawTerminal()
-          local success, err = craftResolvingShort(cSelected, cCycles, cSummary)
+          local success, err = craftResolvingShort(cSelected, cCycles, cSummary, true)
           cStatusMsg = success
-            and ("Crafted %d x %s"):format(cCycles * cSelected.yield, cSelected.displayName)
+            and ("Crafted %d x %s (stored)"):format(cCycles * cSelected.yield, cSelected.displayName)
             or ("Craft failed: " .. tostring(err or "unknown error"))
           cMode = "status"
           drawTerminal()
