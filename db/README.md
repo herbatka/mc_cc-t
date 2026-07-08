@@ -78,10 +78,16 @@ distro's package manager if it's different.
    ```
 3. **Install the Python driver and run the import:**
    ```
-   pip install psycopg2-binary
+   sudo apt install python3-psycopg2
    python3 db/import_recipes.py recipes.jsonl tags.jsonl \
      --host localhost --dbname mc_recipes --user postgres --password pick-a-password
    ```
+   (Debian/Ubuntu's system Python refuses a plain `pip install` with an
+   "externally-managed-environment" error - the apt package is the simplest
+   fix since it's already built against the system's `libpq`. If it's not
+   available on your distro, `pip install psycopg2-binary --break-system-packages`
+   works too - safe here since this is just a one-off import script, not
+   something that shares dependencies with other tools.)
    This applies `db/schema.sql` automatically (tables, indexes, the
    `recipe_ingredients_raw()` function, and the `web_anon`/
    `authenticator` roles PostgREST needs), then **fully truncates and
@@ -140,20 +146,31 @@ loopback request, not a real network hop.
 ## Part 4 - Allow CC:Tweaked to reach it
 
 CC:Tweaked's HTTP API blocks private/loopback addresses by default (an
-anti-SSRF safeguard), so `127.0.0.1` needs to be explicitly allowed in
+anti-SSRF safeguard) via a built-in `$private` rule in
 `computercraft-server.toml` (in your server's `config/` or `serverconfig/`
-folder, depending on loader):
+folder, depending on loader) that denies `127.0.0.1` and the rest of the
+private ranges. Rules are a flat list of `[[http.rules]]` entries evaluated
+top-to-bottom, stopping at the first match - so `127.0.0.1` needs its own
+`[[http.rules]]` entry placed **before** the existing `$private` one, not
+nested inside another rule (there's no such thing as a nested
+`[[http.rules.allow]]` sub-table - that's not real CC:Tweaked syntax):
 
 ```toml
-[http.rules]
-    [[http.rules.allow]]
-        host = "127.0.0.1"
+[http]
+	[[http.rules]]
+		host = "127.0.0.1"
+		action = "allow"
+	[[http.rules]]
+		host = "$private"
+		action = "deny"
+	[[http.rules]]
+		host = "*"
+		action = "allow"
+		...
 ```
 
-The exact syntax can vary a bit by CC:Tweaked version - if it doesn't take
-effect, check that file's existing `[http]`/`[http.rules]` section for the
-right format and add an allow entry alongside whatever's already there.
-Restart the server after editing it.
+Restart the server after editing it - there's no in-game reload for this
+config, it's only read at startup.
 
 At this point the whole pipeline is live: `curl http://127.0.0.1:3001/...`
 works from the server's own shell, and a CC:Tweaked computer's `http.get()`
