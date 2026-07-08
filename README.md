@@ -50,6 +50,10 @@ existing sophisticatedstorage chests plus one crafting turtle plus a small
 Postgres + PostgREST database on the same box (see `db/README.md` for the
 full setup walkthrough - recipe search won't return anything without it).
 
+Importing from INPUT and keeping storage tidy is a separate computer's job
+entirely (`manager.lua`, see below) — the main computer never touches INPUT
+itself, and just refreshes its view of storage when told something changed.
+
 ### Setting up the Craft tab
 
 The crafting turtle is effectively **its own separate computer** — it
@@ -96,3 +100,47 @@ reachability are both checked live, per request, instead: if
 `turtle_craft.lua` isn't running/reachable you get a clear "turtle helper
 not found" error, and if the database is unreachable, search just returns
 nothing with a clear error instead of hanging or crashing.
+
+### Setting up the storage manager
+
+`manager.lua` runs on its **own separate computer** whose only job is
+keeping storage stocked and tidy, so the main computer only has to deal
+with search/withdraw/craft. It needs its own **Wired Modem** on the same
+network as your storage chests and the INPUT barrel (the same network the
+main computer is already on) - unlike the crafting turtle, this is a normal
+computer, not anything special.
+
+1. Place a second computer anywhere on the same wired network as your
+   sophisticatedstorage chests and INPUT barrel, and attach a Wired Modem
+   to it.
+2. Copy `manager.lua` onto it and save it as that computer's own
+   **`startup.lua`**, then reboot so it runs automatically.
+3. Reboot the main computer too, so it picks up rednet hosting for the new
+   `cg_manager` protocol this computer listens on.
+
+From then on, `manager.lua`:
+- **Imports INPUT** every couple seconds, same as the main computer used to
+  - distributing dropped items into whichever chests have room, merging
+  into existing compatible stacks first.
+- **Compacts storage periodically** (every 15 minutes by default,
+  `COMPACT_INTERVAL` in `manager.lua`): for every item scattered across more
+  than one stack, pushes the smaller stacks toward whichever one currently
+  holds the most of it, filling it up before spilling into another slot.
+  There's no fixed "home chest" per item - it's a loose, repeated
+  consolidation that converges toward fewer, fuller stacks over time rather
+  than a strict item-to-chest assignment.
+- **Tells the main computer** whenever it actually moved something, so the
+  main computer's cached view of storage refreshes right away instead of
+  waiting for its own periodic resync. The Search tab shows how long ago it
+  last heard from the manager (`manager: Ns ago` / `manager: not seen`), so
+  it's obvious if the manager computer is off or unreachable.
+
+If the manager computer is off, INPUT just queues up untouched until it's
+back - the main computer has no fallback import path of its own anymore, by
+design (this is the whole point of moving that work off of it). Search,
+withdraw, and crafting all keep working normally in the meantime; they just
+won't see anything still sitting in INPUT. Withdrawals also verify a slot's
+actual contents right before taking from it (not just trusting the last
+cached scan), since the manager can now rearrange chests independently at
+any time - so a stale search result can't accidentally hand you the wrong
+item if something got moved out from under it.

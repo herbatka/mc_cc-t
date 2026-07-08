@@ -27,19 +27,21 @@
       total items, item types, slots used, and the top items in storage.
       Full resync every 10 min, or tap the REFRESH button any time.
 
-  Auto-imports anything dropped in the INPUT barrel, packed densely.
+  Importing from the INPUT barrel and periodically compacting/consolidating
+  storage is handled entirely by a separate computer (manager.lua) - this
+  computer never touches INPUT itself, and just refreshes its view of
+  storage when the manager computer says something changed (see
+  MANAGER_PROTO below). See README.md for manager.lua setup.
   Save as "startup.lua" so it auto-runs. Config is baked in below.
 --------------------------------------------------------------------------- ]]
 
 -------------------------- CONFIG -------------------------------------------
-local INPUT  = "minecraft:barrel_2"
 local OUTPUT = "enderstorage:ender_chest_0"
 -- Where POCKET-COMPUTER withdrawals go. Set this to an EnderStorage ender
 -- chest so items land in your matching Ender Pouch anywhere. Leave nil to
 -- just use OUTPUT. Find its name with the peripheral-listing trick; it's
 -- likely something like "enderstorage:ender_chest_0".
 local REMOTE_OUTPUT = nil
-local IMPORT_INTERVAL = 2     -- seconds: how often loot is pulled from INPUT
 local STATS_INTERVAL  = 600   -- seconds: full resync + repaint (600 = 10 min)
 -- A turtle can't join a wired network at all - the only way items move in
 -- or out of one is turtle.suck()/turtle.drop(), run locally by the turtle
@@ -56,7 +58,6 @@ local monitor = peripheral.find("monitor")
 if not monitor then error("No monitor found. Attach an Advanced Monitor.", 0) end
 monitor.setTextScale(0.5)
 
-if not peripheral.isPresent(INPUT)  then error("INPUT '"..INPUT.."' not found",  0) end
 if not peripheral.isPresent(OUTPUT) then error("OUTPUT '"..OUTPUT.."' not found", 0) end
 
 local storages = {}
@@ -82,16 +83,23 @@ local turtleOk = peripheral.isPresent(TURTLE_STAGING)
 
 -- Open rednet on every modem present: a wireless one enables the pocket
 -- remote, a wired one lets us reach the crafting turtle's helper program
--- over the same network as the storage chests. Both are optional.
+-- and the storage manager computer over the same network as the storage
+-- chests. All are optional independently of each other.
 local REMOTE_PROTO, REMOTE_HOST = "cg_storage", "mainstore"
-local remoteOn = false
+local MANAGER_PROTO, MANAGER_HOST = "cg_manager", "mainstore"
+local remoteOn, anyModemOn = false, false
 for _, name in ipairs(peripheral.getNames()) do
   if peripheral.getType(name) == "modem" then
     rednet.open(name)
+    anyModemOn = true
     if peripheral.call(name, "isWireless") then remoteOn = true end
   end
 end
 if remoteOn then rednet.host(REMOTE_PROTO, REMOTE_HOST) end
+-- manager.lua reaches this over whichever modem it shares a network with
+-- (almost always the wired one, alongside the storage chests) - host this
+-- regardless of wireless, unlike REMOTE_PROTO above.
+if anyModemOn then rednet.host(MANAGER_PROTO, MANAGER_HOST) end
 
 ---------------------------------------------------------------------------
 -- STATE
@@ -105,7 +113,8 @@ local query = ""
 -- terminal (keyboard) UI state
 local uiTab = "search"    -- "search" | "craft"
 local tMode, tSel, tScroll, tSelected, tAmount = "browse", 1, 1, nil, ""
-local pollCount, barrelSeen, lastErr = 0, 0, nil   -- import heartbeat / diagnostics
+local lastErr = nil
+local managerLastSeen = nil   -- os.epoch("utc") of the last heartbeat/storageChanged from manager.lua
 local refreshBtn = nil        -- clickable area for the monitor REFRESH button
 
 -- craft tab state
@@ -234,15 +243,21 @@ local function absorb(source)
   return movedTotal
 end
 
--- Fast-tick auto-import from the INPUT barrel. Returns true if it moved stuff.
-local function importInput() return absorb(INPUT) > 0 end
-
 local function withdraw(entry, amount, dest)
   dest = dest or OUTPUT
   local got = 0
   for _, loc in ipairs(entry.locations) do
     if got >= amount then break end
-    got = got + peripheral.wrap(loc.inv).pushItems(dest, loc.slot, amount - got)
+    local inv = peripheral.wrap(loc.inv)
+    -- The manager computer (manager.lua) moves items between chests on its
+    -- own to compact/consolidate storage, so a cached location can go stale
+    -- between the last buildIndex() and here. Verify the slot still
+    -- actually holds what we expect before taking from it, instead of
+    -- trusting the snapshot and risking pushing whatever item is there now.
+    local d = inv.getItemDetail(loc.slot)
+    if d and keyOf(d) == entry.key then
+      got = got + inv.pushItems(dest, loc.slot, amount - got)
+    end
   end
   return got
 end
@@ -721,7 +736,13 @@ local function drawSearchTab(tw, th)
     term.setTextColor(colors.red); term.write(("ERR: " .. lastErr):sub(1, tw))
   else
     term.setTextColor(colors.gray)
-    term.write(("poll #%d   in-barrel: %d"):format(pollCount, barrelSeen):sub(1, tw))
+    local managerStatus
+    if not managerLastSeen then
+      managerStatus = "manager: not seen"
+    else
+      managerStatus = ("manager: %ds ago"):format(math.floor((os.epoch("utc") - managerLastSeen) / 1000))
+    end
+    term.write(managerStatus:sub(1, tw))
   end
 
   local top = 5
@@ -863,6 +884,30 @@ local function drawTerminal()
   end
 end
 
+local function reselect()
+  if tMode == "amount" then
+    tSelected = tSelected and findEntry(tSelected.key)
+    if not tSelected then tMode = "browse" end
+  end
+end
+
+---------------------------------------------------------------------------
+-- MANAGER (storage-manager computer) MESSAGE HANDLER
+---------------------------------------------------------------------------
+-- manager.lua owns INPUT importing and periodic compaction/consolidation on
+-- its own wired connection to the same chests - this computer never touches
+-- INPUT itself, it just refreshes its cached index when told something
+-- changed, and tracks the last time it heard from the manager at all so
+-- that's visible on the Search tab (see managerLastSeen/drawSearchTab).
+local function handleManager(sender, msg)
+  if type(msg) ~= "table" then return end
+  managerLastSeen = os.epoch("utc")
+  if msg.cmd == "storageChanged" then
+    buildIndex(); applyFilter(); reselect()
+    drawTerminal()
+  end
+end
+
 ---------------------------------------------------------------------------
 -- REMOTE (pocket computer) REQUEST HANDLER
 ---------------------------------------------------------------------------
@@ -955,17 +1000,9 @@ end
 ---------------------------------------------------------------------------
 -- MAIN LOOP
 ---------------------------------------------------------------------------
-local function reselect()
-  if tMode == "amount" then
-    tSelected = tSelected and findEntry(tSelected.key)
-    if not tSelected then tMode = "browse" end
-  end
-end
-
-buildIndex(); importInput(); buildIndex(); applyFilter()
+buildIndex(); applyFilter()
 drawStats(); drawTerminal()
 
-local impTimer  = os.startTimer(IMPORT_INTERVAL)
 local statTimer = os.startTimer(STATS_INTERVAL)
 
 while true do
@@ -973,24 +1010,7 @@ while true do
   local e1 = ev[1]
 
   if e1 == "timer" then
-    if ev[2] == impTimer then
-      -- Peek the barrel, import if anything is there. Wrapped in pcall so a
-      -- transient error can never silently kill the loop; it shows instead.
-      pollCount = pollCount + 1
-      local ok, err = pcall(function()
-        local bar = peripheral.wrap(INPUT)
-        local contents = bar and bar.list() or {}
-        barrelSeen = 0
-        for _, it in pairs(contents) do barrelSeen = barrelSeen + it.count end
-        if barrelSeen > 0 then
-          absorb(INPUT)
-          buildIndex(); applyFilter(); reselect()
-        end
-      end)
-      if ok then lastErr = nil else lastErr = tostring(err) end
-      drawTerminal()
-      impTimer = os.startTimer(IMPORT_INTERVAL)
-    elseif ev[2] == statTimer then
+    if ev[2] == statTimer then
       -- Periodic full resync: also catches items removed from chests by hand.
       buildIndex(); applyFilter(); reselect()
       drawStats(); drawTerminal()
@@ -1129,21 +1149,13 @@ while true do
     end)
     if not keyOk then lastErr = tostring(keyErr); drawTerminal() end
 
-  elseif e1 == "redstone" then
-    -- A comparator on the INPUT barrel pulses redstone when items arrive,
-    -- so we import right away instead of waiting for the next poll.
-    if importInput() then
-      buildIndex(); applyFilter(); reselect()
-      drawTerminal()
-    end
-
   elseif e1 == "rednet_message" then
-    if ev[4] == REMOTE_PROTO then handleRemote(ev[2], ev[3]) end
+    if ev[4] == REMOTE_PROTO then handleRemote(ev[2], ev[3])
+    elseif ev[4] == MANAGER_PROTO then handleManager(ev[2], ev[3]) end
 
   elseif e1 == "monitor_touch" then
     local x, y = ev[3], ev[4]
     if refreshBtn and y == refreshBtn.y and x >= refreshBtn.x1 and x <= refreshBtn.x2 then
-      pcall(function() absorb(INPUT) end)      -- also vacuum the input barrel
       buildIndex(); applyFilter(); reselect()
       drawStats(); drawTerminal()
     end
