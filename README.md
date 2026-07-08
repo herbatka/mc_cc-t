@@ -123,7 +123,7 @@ From then on, `manager.lua`:
 - **Imports INPUT** every couple seconds, same as the main computer used to
   - distributing dropped items into whichever chests have room, merging
   into existing compatible stacks first.
-- **Rebalances storage periodically** (every 15 minutes by default,
+- **Rebalances storage periodically** (every 5 minutes by default,
   `REBALANCE_INTERVAL` in `manager.lua`): ranks every item by how much of it
   you have in total, then lays them out across the chests in a fixed order
   (whichever chest sorts first alphabetically by peripheral name = "chest
@@ -142,6 +142,15 @@ From then on, `manager.lua`:
     only overtakes its neighbor once it beats it by more than that many
     items, so two items with close totals don't swap chest position back
     and forth every run as their counts naturally seesaw during play.
+  - **Stack sizes are discovered per chest, not assumed.** CC:Tweaked has no
+    "what's this slot's real capacity" query, and sophisticatedstorage's
+    stack upgrades raise that capacity per chest well past vanilla's 64 -
+    so instead of hardcoding 64 anywhere, each chest's capacity is inferred
+    from the biggest stack actually observed sitting in it (starting at a
+    default of 64 and only ever growing). This means a stack upgrade you
+    add to a chest gets picked up automatically the first time something
+    actually fills past the old high-water mark in that chest - no config
+    needed, and no need to tell it about further upgrades later either.
 - **Tells the main computer** whenever it actually moved something, so the
   main computer's cached view of storage refreshes right away instead of
   waiting for its own periodic resync. The Search tab shows how long ago it

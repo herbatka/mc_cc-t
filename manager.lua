@@ -24,8 +24,12 @@
 -------------------------- CONFIG -------------------------------------------
 local INPUT = "minecraft:barrel_2"
 local IMPORT_INTERVAL   = 2     -- seconds: how often INPUT is checked
-local REBALANCE_INTERVAL  = 900   -- seconds: how often to rebalance (15 min)
+local REBALANCE_INTERVAL  = 300   -- seconds: how often to rebalance (5 min)
 local HEARTBEAT_INTERVAL = 15   -- seconds: "I'm alive" ping even if nothing moved
+-- Default assumed stack capacity per slot before anything's been observed
+-- (matches an un-upgraded vanilla stack) - see chestCapacity below for how
+-- the real, possibly-upgraded capacity is actually determined.
+local DEFAULT_STACK_CAP = 64
 -- An item only overtakes its neighbor in chest-priority order if it beats it
 -- by more than this many items - without this, two items with close totals
 -- would swap chest position back and forth on every run as their counts
@@ -83,20 +87,36 @@ local function importFromInput()
   return moved
 end
 
+-- Persists (in memory - resets on reboot, which is fine) across runs.
+-- CC:Tweaked's generic inventory peripheral has no "get this slot's real
+-- capacity" query, and sophisticatedstorage's stack upgrades raise that
+-- capacity per chest (not per item) well past vanilla's 64 - so this is
+-- discovered empirically instead: whatever the biggest stack actually
+-- observed in a chest is, that chest can hold at least that much. Starts
+-- at DEFAULT_STACK_CAP and only ever grows, so a stack upgrade added later
+-- gets picked up automatically once anything actually fills past the old
+-- high-water mark (pushItems itself is never capped at our assumption -
+-- only slot-count PLANNING is - so a push can still land above what we'd
+-- assumed, revealing more real capacity on the next scan).
+local chestCapacity = {}   -- chest peripheral name -> largest count ever seen there
+
 -- One full scan of every chest, grouping every stack by item key with each
--- key's total count across all locations. Same idea as startup.lua's
--- buildIndex(), but this computer doesn't need a persistent searchable
--- index - just a fresh snapshot each time rebalance() runs.
+-- key's total count across all locations, and updating chestCapacity from
+-- whatever's actually observed. Same idea as startup.lua's buildIndex(),
+-- but this computer doesn't need a persistent searchable index - just a
+-- fresh snapshot each time rebalance() runs.
 local function scanByKey()
   local byKey = {}
   for _, name in ipairs(storages) do
     local inv = peripheral.wrap(name)
+    chestCapacity[name] = chestCapacity[name] or DEFAULT_STACK_CAP
     for slot, item in pairs(inv.list()) do
       local k = keyOf(item)
       if not byKey[k] then byKey[k] = { total = 0, locations = {} } end
       byKey[k].total = byKey[k].total + item.count
       local locs = byKey[k].locations
       locs[#locs + 1] = { inv = name, slot = slot, count = item.count }
+      if item.count > chestCapacity[name] then chestCapacity[name] = item.count end
     end
   end
   return byKey
@@ -142,15 +162,19 @@ local function updateRankOrder(byKey)
   rankOrder = newOrder
 end
 
--- Walks rankOrder in priority order, handing each key the next
--- ceil(total/64) slots off the front of the flattened chest/slot list.
+-- Walks rankOrder in priority order, handing each key just enough slots off
+-- the front of the flattened chest/slot list to cover its total - using
+-- each slot's OWN chest's discovered capacity rather than a flat 64, since
+-- different chests can have different stack upgrades installed.
 local function assignTargets(byKey, slots)
   local targets, ptr = {}, 1
   for _, key in ipairs(rankOrder) do
-    local needed = math.max(1, math.ceil(byKey[key].total / 64))
+    local remaining = byKey[key].total
     local range = {}
-    for _ = 1, needed do
-      if slots[ptr] then range[#range + 1] = slots[ptr]; ptr = ptr + 1 end
+    while remaining > 0 and slots[ptr] do
+      range[#range + 1] = slots[ptr]
+      remaining = remaining - (chestCapacity[slots[ptr].inv] or DEFAULT_STACK_CAP)
+      ptr = ptr + 1
     end
     targets[key] = range
   end
@@ -174,9 +198,10 @@ local function rebalance()
   -- slotId -> item key currently sitting there, and how many - the count
   -- matters here (not just in scanByKey's return) because a "same key
   -- already there" slot is only a usable merge target if it isn't already
-  -- a maxed-out 64 stack; without checking that, this can get stuck
-  -- repeatedly re-targeting a full stack while a genuinely empty slot in
-  -- the same range sits unused (verified this deadlock in testing).
+  -- maxed out (per that CHEST's discovered capacity, not a flat 64);
+  -- without checking that, this can get stuck repeatedly re-targeting a
+  -- full stack while a genuinely empty slot in the same range sits unused
+  -- (verified this deadlock in testing).
   local occupant, slotCount = {}, {}
   for key, info in pairs(byKey) do
     for _, loc in ipairs(info.locations) do
@@ -196,7 +221,8 @@ local function rebalance()
         local dest
         for _, t in ipairs(range) do
           local sid = slotId(t)
-          if occupant[sid] == key and (slotCount[sid] or 0) < 64 then dest = t; break end
+          local cap = chestCapacity[t.inv] or DEFAULT_STACK_CAP
+          if occupant[sid] == key and (slotCount[sid] or 0) < cap then dest = t; break end
         end
         if not dest then
           for _, t in ipairs(range) do
