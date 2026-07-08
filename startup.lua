@@ -318,9 +318,17 @@ local function apiSearchRecipes(query, limit)
   -- ordered - a plain LIMIT with no ORDER BY isn't deterministic in
   -- Postgres, and with hundreds of matches for a common word, the same
   -- search could return a different arbitrary subset each time.
+  --
+  -- Matching is against output_item, the raw item id (e.g.
+  -- "minecraft:iron_ingot"), which never has spaces - only the prettified
+  -- displayName does ("Iron Ingot"). Typing what you see would otherwise
+  -- never match anything, so any run of whitespace in the query becomes a
+  -- wildcard gap instead of a literal space, matching across underscores
+  -- (or any other separator) the same way the display name visually does.
+  local pattern = "*" .. query:gsub("%s+", "*") .. "*"
   local path = ("/recipes_search?output_item=ilike.%s&select=id,output_item,output_count"
     .. "&order=output_len.asc,output_item.asc&limit=%d")
-    :format(urlEncode("*" .. query .. "*"), limit or 30)
+    :format(urlEncode(pattern), limit or 30)
   return apiGet(path)
 end
 
