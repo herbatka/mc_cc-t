@@ -6,10 +6,10 @@ Usage:
 
 tags_raw.txt is produced by:
     grep "TAGDUMP " logs/latest.log > tags_raw.txt
-after running kubejs/dump_all_tags.js. Each tag can appear multiple times
-in the log (ServerEvents.tags fires repeatedly during startup, and only a
-later firing has fully-resolved data) - this keeps the LAST occurrence of
-each tag, which is what has real data.
+after running the script from generate_tag_dump_script.py. Each tag can
+appear multiple times in the log (ServerEvents.tags fires repeatedly during
+startup, and only a later firing has fully-resolved data) - this keeps the
+LAST occurrence of each tag, which is what has real data.
 """
 
 import json

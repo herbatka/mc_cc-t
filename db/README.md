@@ -38,23 +38,25 @@ server session.
    ```
    This prints a summary (total parsed, failures, recipe type breakdown) so
    you can eyeball that it looks sane before moving on.
-4. **Dump every item tag.** Copy `kubejs/dump_all_tags.js` (in this repo)
-   into `kubejs/server_scripts/` the same way as step 1, restart/reload,
-   then:
+4. **Generate a tag-dump script targeting only the tags your recipes
+   actually reference** (not every tag in the game - the `tags` table's
+   only consumer is crafting-ingredient resolution, e.g. turning a "any
+   planks" recipe slot into a concrete item list, and that only ever needs
+   tags that actually appear as an ingredient somewhere in recipes.jsonl.
+   The Search tab's tag matching is unrelated - it reads tags straight off
+   the game's live item data instead, see top-level README.md):
+   ```
+   python3 db/generate_tag_dump_script.py recipes.jsonl dump_tags.js
+   ```
+5. **Run that generated script** the same way as step 1: copy `dump_tags.js`
+   into `kubejs/server_scripts/`, restart/reload, then:
    ```
    grep "TAGDUMP " logs/latest.log > tags_raw.txt
    ```
-   This walks every tag the item registry itself knows about (vanilla +
-   every mod), not just tags used as a recipe ingredient - so classification
-   tags like `c:crops` on a farming mod's produce are covered too, which
-   matters for the Search tab's tag matching (see top-level README.md).
    Note: `ServerEvents.tags` fires several times during startup, and only a
    later firing (thread name `Worker-ResourceReload-*`) has fully-resolved
-   data - seeing each tag logged more than once is expected, not a bug. If
-   the log instead shows a single `ENUMERATE_TAGS_ERROR ...` line, the
-   registry-enumeration call in that script needs adjusting for your
-   Minecraft/KubeJS version - open an issue/ask with that exact error text.
-5. **Parse the tag dump**, keeping the last (fully-resolved) entry per tag:
+   data - seeing each tag logged more than once is expected, not a bug.
+6. **Parse the tag dump**, keeping the last (fully-resolved) entry per tag:
    ```
    python3 db/parse_tag_log.py tags_raw.txt tags.jsonl
    ```
@@ -188,10 +190,12 @@ to that same URL should now succeed too.
   `grid_pos` (1-9, row-major - matches `GRID_SLOTS` in `startup.lua`), `kind`
   (`item` or `tag`), `ref`, `count`. Multiple rows for the same
   `(recipe_id, grid_pos)` mean any of them is an acceptable ingredient there.
-- `tags` - `(tag, item)` membership pairs for every item tag the game knows
-  about (vanilla + every mod), from `kubejs/dump_all_tags.js` - not limited
-  to tags used as recipe ingredients, since the Search tab's tag matching
-  needs classification tags too (e.g. `c:crops`), not just crafting ones.
+- `tags` - `(tag, item)` membership pairs, only for tags actually referenced
+  by the recipe dump (not every tag in the game) - the only consumer is
+  crafting-ingredient resolution (turning a tag-based recipe slot into its
+  concrete candidate items), which never needs a tag beyond that. The
+  Search tab's tag matching is unrelated to this table - see top-level
+  README.md.
 - `recipe_ingredients_raw(recipe_id)` - a SQL function; given a recipe id,
   returns each grid position's needed count plus the raw item-or-tag
   ingredient rows, unresolved. The Lua side resolves tags itself with a

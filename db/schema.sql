@@ -33,10 +33,11 @@ CREATE TABLE IF NOT EXISTS recipe_ingredients (
 
 CREATE INDEX IF NOT EXISTS recipe_ingredients_recipe_idx ON recipe_ingredients (recipe_id);
 
--- Tag -> concrete item membership (from kubejs/dump_all_tags.js). Covers
--- every item tag the game knows about, not just tags used as a recipe
--- ingredient - the Search tab's tag matching needs classification tags
--- (e.g. c:crops) too, not only crafting-relevant ones.
+-- Tag -> concrete item membership (from dump_tags.js). Only covers tags
+-- actually referenced by the recipe dump, not every tag in the game - the
+-- only consumer is crafting-ingredient resolution, which never needs more
+-- than that (the Search tab's tag matching reads tags off live item data
+-- instead, see top-level README.md).
 CREATE TABLE IF NOT EXISTS tags (
   tag   TEXT NOT NULL,
   item  TEXT NOT NULL,
