@@ -34,6 +34,11 @@ this UI avoids both entirely.
   several different recipes (e.g. a vanilla chest vs. a modded variant),
   search results show each recipe separately, tagged with which mod it's
   from (`[minecraft]`, `[aether]`, etc.) so you can tell them apart.
+  A single batch is capped at however many cycles fit any one ingredient
+  into a single turtle slot (~64, a plain vanilla stack) - a recipe with a
+  heavy per-craft ingredient may cap out well under the 64-cycle max, so
+  asking for a very large quantity of something like that takes more than
+  one trip through the Craft tab instead of one giant batch.
 - **Missing an ingredient?** If a short ingredient has its own craftable
   recipe *and* that recipe's own ingredients are fully in stock right now,
   it's marked with a `*` and pressing **S** crafts the missing
