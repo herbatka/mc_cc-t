@@ -172,7 +172,13 @@ local function drawCraft(w, h)
     if cShort then
       term.write((cHasSub and "* = craftable" or "Missing ingredients above."):sub(1, w))
       term.setCursorPos(1, y + 2)
-      term.write((cHasSub and "S=craft missing+this  C=back" or "C=back"):sub(1, w))
+      if cHasSub then
+        term.write("S=store")
+        term.setCursorPos(1, y + 3)
+        term.write("O=output  C=back")
+      else
+        term.write("C=back")
+      end
     else
       term.write("Enter=store")
       term.setCursorPos(1, y + 2)
@@ -330,7 +336,13 @@ while true do
         elseif k == keys.s and cShort and cHasSub then
           cstatus = "Crafting missing ingredients..."; draw()
           local r = req({ cmd = "craftRequest", key = cSelected.key, amount = cProduced, auto = true }, 15)
-          if r and r.ok then cstatus = ("Crafted %d x %s"):format(r.produced or cProduced, cSelected.displayName)
+          if r and r.ok then cstatus = ("Crafted %d x %s (stored)"):format(r.produced or cProduced, cSelected.displayName)
+          else cstatus = "Craft failed: " .. tostring((r and r.err) or "no response") end
+          cMode = "status"
+        elseif k == keys.o and cShort and cHasSub then
+          cstatus = "Crafting missing ingredients..."; draw()
+          local r = req({ cmd = "craftRequest", key = cSelected.key, amount = cProduced, auto = true, deliverToOutput = true }, 15)
+          if r and r.ok then cstatus = ("Crafted %d x %s (sent to output)"):format(r.produced or cProduced, cSelected.displayName)
           else cstatus = "Craft failed: " .. tostring((r and r.err) or "no response") end
           cMode = "status"
         end

@@ -845,7 +845,13 @@ local function drawCraftConfirm(tw)
   if cShort then
     term.write((cHasSub and "* = craftable" or "Missing ingredients above."):sub(1, tw))
     term.setCursorPos(1, y + 2)
-    term.write((cHasSub and "[S] craft missing + this   [C] cancel" or "[C] cancel"):sub(1, tw))
+    if cHasSub then
+      term.write("[S] missing + this -> storage")
+      term.setCursorPos(1, y + 3)
+      term.write("[O] -> output   [C] cancel")
+    else
+      term.write("[C] cancel")
+    end
   else
     term.write("[Enter] craft -> storage")
     term.setCursorPos(1, y + 2)
@@ -1136,6 +1142,15 @@ while true do
           local success, err = craftResolvingShort(cSelected, cCycles, cSummary, true)
           cStatusMsg = success
             and ("Crafted %d x %s (stored)"):format(cCycles * cSelected.yield, cSelected.displayName)
+            or ("Craft failed: " .. tostring(err or "unknown error"))
+          cMode = "status"
+          drawTerminal()
+        elseif code == keys.o and cShort and cHasSub then
+          cStatusMsg = "Crafting missing ingredients..."
+          drawTerminal()
+          local success, err = craftResolvingShort(cSelected, cCycles, cSummary, false)
+          cStatusMsg = success
+            and ("Crafted %d x %s (sent to output)"):format(cCycles * cSelected.yield, cSelected.displayName)
             or ("Craft failed: " .. tostring(err or "unknown error"))
           cMode = "status"
           drawTerminal()

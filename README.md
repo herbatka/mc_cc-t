@@ -36,12 +36,13 @@ this UI avoids both entirely.
   from (`[minecraft]`, `[aether]`, etc.) so you can tell them apart.
 - **Missing an ingredient?** If a short ingredient has its own craftable
   recipe *and* that recipe's own ingredients are fully in stock right now,
-  it's marked with a `*` and pressing **S** instead of Enter/O crafts the
-  missing ingredient(s) first (always banked into storage - they're
-  intermediates, not what you asked for), then crafts the item you
-  actually wanted into storage too. This only goes one level deep: if the
-  missing ingredient's own recipe is *also* short something, it's shown as
-  missing with no `*` and
+  it's marked with a `*` and pressing **S** crafts the missing
+  ingredient(s) first (always banked into storage - they're intermediates,
+  not what you asked for), then crafts the item you actually wanted into
+  storage too. Press **O** instead for the same missing-ingredients-first
+  flow but delivering the final item to OUTPUT, same choice as a normal
+  craft. This only goes one level deep: if the missing ingredient's own
+  recipe is *also* short something, it's shown as missing with no `*` and
   no auto-craft option, rather than chasing an arbitrarily deep tree of
   crafts you never approved.
 
@@ -122,13 +123,25 @@ From then on, `manager.lua`:
 - **Imports INPUT** every couple seconds, same as the main computer used to
   - distributing dropped items into whichever chests have room, merging
   into existing compatible stacks first.
-- **Compacts storage periodically** (every 15 minutes by default,
-  `COMPACT_INTERVAL` in `manager.lua`): for every item scattered across more
-  than one stack, pushes the smaller stacks toward whichever one currently
-  holds the most of it, filling it up before spilling into another slot.
-  There's no fixed "home chest" per item - it's a loose, repeated
-  consolidation that converges toward fewer, fuller stacks over time rather
-  than a strict item-to-chest assignment.
+- **Rebalances storage periodically** (every 15 minutes by default,
+  `REBALANCE_INTERVAL` in `manager.lua`): ranks every item by how much of it
+  you have in total, then lays them out across the chests in a fixed order
+  (whichever chest sorts first alphabetically by peripheral name = "chest
+  1") - the highest-total item fills as many slots as it needs starting
+  from the very first one, the next-highest continues right after it
+  (spilling into the next chest if it doesn't fit), and so on. So with
+  enough items and enough runs you get "chest 1 is all Ancient Stone, then
+  Diamond, then Raw Copper, ..." rather than just tidier chaos.
+  - This doesn't try to achieve the exact target order in one pass -
+    displacing a lower-priority item can itself require displacing whatever
+    was already sitting where it needs to go, so it moves what it safely
+    can each run (into an empty slot, or one already holding the same item)
+    and leaves the rest for the next run, converging gradually. A big
+    inventory change can take a few cycles to fully settle.
+  - Rankings have a deadzone (`RANK_SWAP_THRESHOLD`, 64 by default): an item
+    only overtakes its neighbor once it beats it by more than that many
+    items, so two items with close totals don't swap chest position back
+    and forth every run as their counts naturally seesaw during play.
 - **Tells the main computer** whenever it actually moved something, so the
   main computer's cached view of storage refreshes right away instead of
   waiting for its own periodic resync. The Search tab shows how long ago it
