@@ -6,27 +6,21 @@
       Escape closes the screen, F2 takes a screenshot - so this UI never
       uses them. Left/Right switch tabs; [C] cancels instead of Escape.)
 
-      Left/Right  ->  cycle between the Search / Craft / Teach tabs
+      Left/Right  ->  cycle between the Search / Craft tabs
       Search tab:  type to search  |  Up/Down to pick  |  Enter to withdraw
                    then type amount, Enter to confirm  ([C] cancels, Backspace edits)
-      Craft tab:   type a name, Enter to search a recipe database (HTTP API)
-                   plus anything you've taught locally  |  Up/Down to pick
-                   |  Enter to select, then type amount, Enter shows the
-                   ingredient list (what's needed + what's missing), Enter
-                   again crafts it.
-      Teach tab:   arrange the ingredients in the turtle's 3x3 crafting grid
-                   yourself, then Enter - the turtle actually crafts it once
-                   (for real) and the script remembers the arrangement +
-                   real output for next time. Useful for anything not in the
-                   recipe database (custom NBT variants, freshly added mods).
+      Craft tab:   type a name, Enter to search the recipe database (HTTP
+                   API)  |  Up/Down to pick  |  Enter to select, then type
+                   amount, Enter shows the ingredient list (what's needed +
+                   what's missing), Enter again crafts it.
 
-      The Craft/Teach tabs need a turtle (any kind) equipped with a Crafting
+      The Craft tab needs a turtle (any kind) equipped with a Crafting
       Table, plus a staging barrel placed directly below it and wired into
-      your storage network (see TURTLE_STAGING below). Without that, the
-      tabs just say so and the Search tab keeps working as before. The
-      Craft tab also needs the recipe database's HTTP API reachable (see
-      API_BASE below and db/README.md) - if it isn't, locally-taught recipes
-      still work, DB search just won't return anything.
+      your storage network (see TURTLE_STAGING below), AND the recipe
+      database's HTTP API reachable (see API_BASE below and db/README.md).
+      Without the turtle/barrel, the tab just says so and the Search tab
+      keeps working as before. Without the database, search just returns
+      nothing (with a clear error) instead of hanging or crashing.
       See README.md for full setup notes.
 
   MONITOR  ->  passive stats dashboard, auto-refreshes every 15s:
@@ -47,7 +41,6 @@ local OUTPUT = "enderstorage:ender_chest_0"
 local REMOTE_OUTPUT = nil
 local IMPORT_INTERVAL = 2     -- seconds: how often loot is pulled from INPUT
 local STATS_INTERVAL  = 600   -- seconds: full resync + repaint (600 = 10 min)
-local RECIPE_FILE = "recipes.db"   -- where taught (custom) recipes are saved
 -- A turtle can't join a wired network at all - the only way items move in
 -- or out of one is turtle.suck()/turtle.drop(), run locally by the turtle
 -- itself. So ingredients/output are staged through a barrel placed directly
@@ -104,12 +97,13 @@ if remoteOn then rednet.host(REMOTE_PROTO, REMOTE_HOST) end
 -- STATE
 ---------------------------------------------------------------------------
 local index, filtered = {}, {}
+local indexByKey = {}   -- same entries as `index`, keyed by e.key for O(1) lookup
 local nameCache, freeSlots = {}, {}
 local usedSlots, totalSlots = 0, 0
 local query = ""
 
 -- terminal (keyboard) UI state
-local uiTab = "search"    -- "search" | "craft" | "teach"
+local uiTab = "search"    -- "search" | "craft"
 local tMode, tSel, tScroll, tSelected, tAmount = "browse", 1, 1, nil, ""
 local pollCount, barrelSeen, lastErr = 0, 0, nil   -- import heartbeat / diagnostics
 local refreshBtn = nil        -- clickable area for the monitor REFRESH button
@@ -121,7 +115,6 @@ local cMode, cSel, cScroll, cSelected, cAmount = "search", 1, 1, nil, ""
 local cPlan, cCycles, cShort = {}, 1, false
 local cStatusMsg = turtleOk and nil
   or ("No staging barrel found at " .. TURTLE_STAGING .. " (see README).")
-local tchMsg = nil   -- last teach-attempt result, shown on the Teach tab
 
 local function keyOf(item) return item.name .. "|" .. (item.nbt or "") end
 
@@ -156,10 +149,15 @@ local function buildIndex()
   index = {}
   for _, e in pairs(agg) do index[#index + 1] = e end
   table.sort(index, function(a, b) return a.displayName:lower() < b.displayName:lower() end)
+  -- `agg` is already keyed exactly the way findEntry needs - reuse it
+  -- directly instead of building a second copy or scanning `index` (matters
+  -- a lot now: a single tag-based ingredient can resolve to hundreds of
+  -- candidate items, each needing a lookup here).
+  indexByKey = agg
 end
 
 local function findEntry(key)
-  for _, e in ipairs(index) do if e.key == key then return e end end
+  return indexByKey[key]
 end
 
 -- Plain vanilla ingredient items (planks, ingots, coal...) never carry NBT,
@@ -248,31 +246,6 @@ local function labelFor(name)
   return e and e.displayName or prettify(name)
 end
 
--- An ingredient is { names = {acceptable item ids}, count = n }; `single`
--- is the common case of exactly one acceptable item. Used both by taught
--- recipes' grids and by grids resolved from the database (see
--- apiResolveIngredients below).
-local function ing(names, count) return { names = names, count = count or 1 } end
-local function single(name, count) return ing({ name }, count) end
-
-local customRecipes = {}
-
-local function loadCustomRecipes()
-  if not fs.exists(RECIPE_FILE) then return {} end
-  local h = fs.open(RECIPE_FILE, "r")
-  if not h then return {} end
-  local data = h.readAll(); h.close()
-  local ok, tbl = pcall(textutils.unserialize, data)
-  return (ok and type(tbl) == "table") and tbl or {}
-end
-
-local function saveCustomRecipes()
-  local h = fs.open(RECIPE_FILE, "w")
-  if not h then return end
-  h.write(textutils.serialize(customRecipes))
-  h.close()
-end
-
 -- Minimal percent-encoding for building query strings - deliberately not
 -- relying on textutils.urlEncode so this has no version-specific dependency.
 local function urlEncode(s)
@@ -342,85 +315,46 @@ local function apiGetRecipeById(recipeId)
   return rows[1]
 end
 
--- Every recipe entry (whether taught locally or found in the database) has
--- the same shape: { recipeKey, displayName, yield, output, grid, source }.
--- `grid` is nil for freshly-searched database entries until
--- resolveRecipeGrid() fetches + caches it (see below) - taught recipes
--- always have theirs already.
-local function customRecipeEntry(r)
-  return {
-    recipeKey = "custom:" .. r.output,
-    displayName = r.displayName or r.output,
-    yield = r.yield,
-    output = r.output,
-    grid = r.grid,
-    source = "custom",
-  }
-end
-
-local function dbRecipeEntry(row)
+-- Every recipe entry has the same shape: { recipeKey, displayName, yield,
+-- output, grid }. recipeKey is just the database recipe id; `grid` is nil
+-- until resolveRecipeGrid() fetches + caches it (see below) - not fetched
+-- up front since a search can return many results and we only need the
+-- grid for whichever one gets selected.
+local function makeRecipeEntry(row)
   local ns = row.id:match("^([^:]+):") or "?"
   return {
-    recipeKey = "db:" .. row.id,
+    recipeKey = row.id,
     displayName = ("%s [%s]"):format(labelFor(row.output_item), ns),
     yield = row.output_count or 1,
     output = row.output_item,
     grid = nil,
-    source = "db",
-    dbId = row.id,
   }
 end
 
--- Searches locally-taught recipes (instant) plus the database (one HTTP
--- request) and merges them into a single list. Returns (results, dbErr) -
--- dbErr is set (but results still returned) if the database was
--- unreachable, so local recipes keep working even if the API is down.
+-- Searches the recipe database. Returns (results, err) - on failure,
+-- results is an empty list and err explains why (e.g. database unreachable).
 local function searchRecipes(query)
-  local results, ql = {}, query:lower()
-  for _, r in ipairs(customRecipes) do
-    if r.output and (query == "" or (r.displayName or r.output):lower():find(ql, 1, true)) then
-      results[#results + 1] = customRecipeEntry(r)
-    end
-  end
-
-  local dbErr = nil
-  if query ~= "" then
-    local rows, err = apiSearchRecipes(query, 30)
-    if rows then
-      for _, row in ipairs(rows) do results[#results + 1] = dbRecipeEntry(row) end
-    else
-      dbErr = err
-    end
-  end
-
-  table.sort(results, function(a, b) return a.displayName:lower() < b.displayName:lower() end)
-  return results, dbErr
+  if query == "" then return {} end
+  local rows, err = apiSearchRecipes(query, 30)
+  if not rows then return {}, err end
+  local results = {}
+  for _, row in ipairs(rows) do results[#results + 1] = makeRecipeEntry(row) end
+  return results
 end
 
 -- Reconstructs a recipe entry from a recipeKey alone (used by the pocket
 -- remote, which only has the key round-tripped from an earlier search).
 local function findByRecipeKey(key)
-  local kind, ref = key:match("^(%a+):(.+)$")
-  if kind == "custom" then
-    for _, r in ipairs(customRecipes) do
-      if r.output == ref then return customRecipeEntry(r) end
-    end
-    return nil, "recipe no longer exists"
-  elseif kind == "db" then
-    local row, err = apiGetRecipeById(ref)
-    if not row then return nil, err end
-    return dbRecipeEntry(row)
-  end
-  return nil, "bad recipe key"
+  local row, err = apiGetRecipeById(key)
+  if not row then return nil, err end
+  return makeRecipeEntry(row)
 end
 
--- Fills in entry.grid if it isn't already known (only database entries
--- need this - taught recipes always have theirs). Caches onto the entry
--- so re-using the same selection doesn't refetch.
+-- Fills in entry.grid if it isn't already known. Caches onto the entry so
+-- re-using the same selection doesn't refetch.
 local function resolveRecipeGrid(entry)
   if entry.grid then return entry.grid end
-  if entry.source ~= "db" then return nil, "no grid data for this recipe" end
-  local grid, err = apiResolveIngredients(entry.dbId)
+  local grid, err = apiResolveIngredients(entry.recipeKey)
   if not grid then return nil, err end
   entry.grid = grid
   return grid
@@ -485,13 +419,6 @@ local function turtleCraft(cycles)
   return reply.ok, reply.err
 end
 
-local function turtleSnapshot()
-  local reply, err = turtleRequest({ cmd = "snapshot" })
-  if not reply then return nil, err end
-  if not reply.ok then return nil, reply.err or "snapshot failed" end
-  return reply.slots
-end
-
 -- Tells the turtle to suckDown() `count` of whatever's currently staged in
 -- the barrel into grid slot `slot`. Ingredients must be staged one distinct
 -- item at a time (see runCraft) since suck() can't filter by item name.
@@ -552,59 +479,6 @@ local function runCraft(recipe, cycles, plan)
   collectFromTurtle(craftOk and recipe.output or nil)
 
   return craftOk, craftErr
-end
-
--- Learn a recipe by actually crafting whatever is currently arranged in the
--- turtle's grid. Diffs the turtle's inventory before/after to work out
--- exactly what was consumed (per grid slot) and what came out.
-local function performTeach()
-  local before, snapErr = turtleSnapshot()
-  if not before then return false, snapErr end
-
-  local craftOk, craftErr = turtleCraft(1)
-  if not craftOk then return false, craftErr or "no matching recipe for that arrangement" end
-
-  local after, snapErr2 = turtleSnapshot()
-  if not after then return false, snapErr2 end
-
-  local grid = {}
-  for pos, slot in ipairs(GRID_SLOTS) do
-    local b, a = before[slot], after[slot]
-    if b then
-      local sameItem = a and a.name == b.name
-      local consumed = sameItem and (b.count - a.count) or b.count
-      if consumed > 0 then grid[pos] = single(b.name, consumed) end
-    end
-  end
-
-  local outputName, outputDisplay, outputYield
-  for i = 1, 16 do
-    local b, a = before[i], after[i]
-    if a then
-      if not b or b.name ~= a.name then
-        outputName, outputDisplay, outputYield = a.name, a.displayName or a.name, a.count
-        break
-      elseif a.count > b.count then
-        outputName, outputDisplay, outputYield = a.name, a.displayName or a.name, a.count - b.count
-        break
-      end
-    end
-  end
-
-  if not outputName then
-    collectFromTurtle(nil)
-    return false, "crafted, but couldn't identify the output slot"
-  end
-
-  local recipe = { output = outputName, displayName = outputDisplay, yield = math.max(1, outputYield), grid = grid, custom = true }
-  for i = #customRecipes, 1, -1 do
-    if customRecipes[i].output == outputName then table.remove(customRecipes, i) end
-  end
-  customRecipes[#customRecipes + 1] = recipe
-  saveCustomRecipes()
-
-  collectFromTurtle(outputName)
-  return true, ("Learned %s (yields %d). Sent to output."):format(outputDisplay, recipe.yield)
 end
 
 ---------------------------------------------------------------------------
@@ -672,25 +546,15 @@ local function drawTabBar(tw)
   seg(" Search ", uiTab == "search")
   term.setBackgroundColor(colors.black); term.setTextColor(colors.white); term.write(" ")
   seg(" Craft ", uiTab == "craft")
-  term.setBackgroundColor(colors.black); term.setTextColor(colors.white); term.write(" ")
-  seg(" Teach ", uiTab == "teach")
   term.setBackgroundColor(colors.black); term.setTextColor(colors.white)
-  local used = 8 + 1 + 7 + 1 + 7
+  local used = 8 + 1 + 7
   if tw > used then term.write(string.rep(" ", tw - used)) end
 end
 
 -- Minecraft eats Escape and most F-keys before they ever reach the
 -- computer as key events (Escape closes the screen, F2 takes a
 -- screenshot, etc.), so tabs cycle with Left/Right instead of a hotkey.
-local UI_TAB_ORDER = { "search", "craft", "teach" }
-local function nextTab(t, dir)
-  local i = 1
-  for idx, v in ipairs(UI_TAB_ORDER) do if v == t then i = idx end end
-  i = i + dir
-  if i < 1 then i = #UI_TAB_ORDER end
-  if i > #UI_TAB_ORDER then i = 1 end
-  return UI_TAB_ORDER[i]
-end
+local function nextTab(t) return (t == "search") and "craft" or "search" end
 
 local function drawSearchTab(tw, th)
   if tSel < 1 then tSel = 1 end
@@ -811,24 +675,11 @@ end
 local function drawCraftStatus(tw)
   term.setCursorBlink(false)
   term.setCursorPos(1, 2); term.setTextColor(colors.cyan)
-  term.write((cSelected and cSelected.displayName or "Teach"):sub(1, tw))
+  term.write(cSelected.displayName:sub(1, tw))
   term.setCursorPos(1, 3); term.setTextColor(colors.lightGray)
   term.write((cStatusMsg or ""):sub(1, tw))
   term.setCursorPos(1, 5); term.setTextColor(colors.gray)
   term.write("[Enter] back to list")
-end
-
-local function drawTeachTab(tw)
-  term.setCursorBlink(false)
-  term.setCursorPos(1, 2); term.setTextColor(colors.cyan)
-  term.write("Teach a new recipe")
-  term.setCursorPos(1, 3); term.setTextColor(colors.lightGray)
-  term.write("Arrange ingredients in the turtle's grid")
-  term.setCursorPos(1, 4); term.write("(top-left 3x3: slots 1-3, 5-7, 9-11)")
-  term.setCursorPos(1, 6); term.setTextColor(colors.yellow)
-  term.write("[Enter] capture + craft")
-  term.setCursorPos(1, 8); term.setTextColor(colors.lightGray)
-  term.write((tchMsg or ""):sub(1, tw))
 end
 
 local function drawTerminal()
@@ -848,14 +699,6 @@ local function drawTerminal()
     elseif cMode == "amount" then drawCraftAmount(tw)
     elseif cMode == "confirm" then drawCraftConfirm(tw)
     elseif cMode == "status" then drawCraftStatus(tw)
-    end
-  elseif uiTab == "teach" then
-    if not turtleOk then
-      term.setCursorPos(1, 3); term.setTextColor(colors.red)
-      term.write((cStatusMsg or "Teach tab unavailable."):sub(1, tw))
-      term.setCursorPos(1, 4); term.write("See README.md.")
-    else
-      drawTeachTab(tw)
     end
   end
 end
@@ -945,7 +788,6 @@ local function reselect()
 end
 
 buildIndex(); importInput(); buildIndex(); applyFilter()
-customRecipes = loadCustomRecipes()
 drawStats(); drawTerminal()
 
 local impTimer  = os.startTimer(IMPORT_INTERVAL)
@@ -1007,9 +849,8 @@ while true do
     if code == keys.left or code == keys.right then
       local canSwitch = (uiTab == "search" and tMode == "browse")
         or (uiTab == "craft" and (cMode == "search" or cMode == "list"))
-        or (uiTab == "teach")
       if canSwitch then
-        uiTab = nextTab(uiTab, code == keys.right and 1 or -1)
+        uiTab = nextTab(uiTab)
         drawTerminal()
       end
 
@@ -1089,13 +930,6 @@ while true do
         if code == keys.enter or code == keys.c then
           cStatusMsg = nil; cMode = "list"; drawTerminal()
         end
-      end
-
-    elseif uiTab == "teach" and turtleOk then
-      if code == keys.enter then
-        local ok, msg = performTeach()
-        tchMsg = msg
-        drawTerminal()
       end
     end
     end)

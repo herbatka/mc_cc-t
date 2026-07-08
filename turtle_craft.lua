@@ -16,8 +16,8 @@
   into the barrel for the main computer to absorb into storage.
 
   Needs a modem (wired or wireless, either works) for rednet messaging to
-  the main computer - that's just for the "craft this" / "give me your
-  inventory" requests, unrelated to the barrel-based item transfer above.
+  the main computer - that's just for "craft this" / "load this slot"
+  requests, unrelated to the barrel-based item transfer above.
 --------------------------------------------------------------------------- ]]
 
 local PROTO, HOST = "cg_turtle", "craftbot"
@@ -45,13 +45,6 @@ while true do
       local ok, err = turtle.craft(msg.cycles or 64)
       rednet.send(sender, { ok = ok, err = err }, PROTO)
 
-    elseif msg.cmd == "snapshot" then
-      -- The `detailed` flag is required to get displayName/tags/etc; without
-      -- it, turtle.getItemDetail only returns {name, count}.
-      local slots = {}
-      for i = 1, 16 do slots[i] = turtle.getItemDetail(i, true) end
-      rednet.send(sender, { ok = true, slots = slots }, PROTO)
-
     elseif msg.cmd == "loadSlot" then
       -- Suck `count` of whatever's currently in the staging barrel below
       -- into grid slot `slot`. The main computer only stages one distinct
@@ -67,9 +60,6 @@ while true do
         turtle.select(i)
         turtle.dropDown()
       end
-      rednet.send(sender, { ok = true }, PROTO)
-
-    elseif msg.cmd == "ping" then
       rednet.send(sender, { ok = true }, PROTO)
     end
   end

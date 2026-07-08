@@ -17,10 +17,6 @@
     Amount:      type a number, Enter to continue, C to cancel.
     Tab:         deposit (search tab only, same as before).
 
-  Teaching a new recipe has to happen at the main computer, since it needs
-  you to physically arrange ingredients in the turtle - this remote can only
-  search and craft recipes it already knows.
-
   Save as "startup.lua" on the pocket computer so it runs when opened.
 --------------------------------------------------------------------------- ]]
 
