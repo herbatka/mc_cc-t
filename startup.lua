@@ -112,7 +112,7 @@ local refreshBtn = nil        -- clickable area for the monitor REFRESH button
 local cFiltered = {}
 local cQuery = ""
 local cMode, cSel, cScroll, cSelected, cAmount = "search", 1, 1, nil, ""
-local cPlan, cCycles, cShort = {}, 1, false
+local cPlan, cSummary, cCycles, cShort = {}, {}, 1, false
 local cStatusMsg = turtleOk and nil
   or ("No staging barrel found at " .. TURTLE_STAGING .. " (see README).")
 
@@ -416,27 +416,51 @@ end
 -- Pick whichever acceptable item name has the most stock (handles "any
 -- planks"-style ingredients, and resolved tags, without needing to know
 -- which one specifically to prefer).
-local function resolveIngredient(ingredient, cycles)
-  local needed = ingredient.count * cycles
+local function pickBest(ingredient)
   local best, bestCount = ingredient.names[1], -1
   for _, nm in ipairs(ingredient.names) do
     local e = findEntryByName(nm)
     local count = e and e.count or 0
     if count > bestCount then best, bestCount = nm, count end
   end
-  return { name = best, needed = needed, available = bestCount, short = math.max(0, needed - bestCount) }
+  return best
 end
 
+-- Resolves a recipe into two views:
+--   positions - one row per grid slot (pos, name, needed), in position
+--     order - what runCraft actually loads into each turtle slot.
+--   summary   - one row per distinct concrete item, with the TOTAL needed
+--     across every position that uses it vs. real storage stock. Checking
+--     stock per-position instead of per-total was a real bug: a recipe
+--     needing e.g. 5 grid slots of Reinforced Brick but only 1 in stock
+--     would show each slot individually as "need 1, have 1" (looks fine)
+--     and never flag the craft as short overall.
 local function planCraft(recipe, cycles)
-  local plan, anyShort = {}, false
+  local positions = {}
   for pos, ingredient in pairs(recipe.grid) do
-    local r = resolveIngredient(ingredient, cycles)
-    r.pos = pos
-    plan[#plan + 1] = r
-    if r.short > 0 then anyShort = true end
+    positions[#positions + 1] = { pos = pos, name = pickBest(ingredient), needed = ingredient.count * cycles }
   end
-  table.sort(plan, function(a, b) return a.pos < b.pos end)
-  return plan, anyShort
+  table.sort(positions, function(a, b) return a.pos < b.pos end)
+
+  local totals, order = {}, {}
+  for _, p in ipairs(positions) do
+    if not totals[p.name] then
+      local e = findEntryByName(p.name)
+      totals[p.name] = { name = p.name, needed = 0, available = e and e.count or 0 }
+      order[#order + 1] = p.name
+    end
+    totals[p.name].needed = totals[p.name].needed + p.needed
+  end
+
+  local summary, anyShort = {}, false
+  for _, name in ipairs(order) do
+    local t = totals[name]
+    t.short = math.max(0, t.needed - t.available)
+    if t.short > 0 then anyShort = true end
+    summary[#summary + 1] = t
+  end
+
+  return positions, summary, anyShort
 end
 
 -- Pushes `amount` of `name` from storage into the staging barrel (the
@@ -709,11 +733,11 @@ local function drawCraftConfirm(tw)
   term.setCursorPos(1, 2); term.setTextColor(colors.cyan)
   term.write(("Craft %d x %s"):format(cCycles * cSelected.yield, cSelected.displayName):sub(1, tw))
   local y = 4
-  for _, p in ipairs(cPlan) do
+  for _, t in ipairs(cSummary) do
     term.setCursorPos(1, y)
-    term.setTextColor(p.short > 0 and colors.red or colors.lightGray)
-    local line = ("%-16s need %3d  have %3d"):format(labelFor(p.name):sub(1, 16), p.needed, p.available)
-    if p.short > 0 then line = line .. "  SHORT " .. p.short end
+    term.setTextColor(t.short > 0 and colors.red or colors.lightGray)
+    local line = ("%-16s need %3d  have %3d"):format(labelFor(t.name):sub(1, 16), t.needed, t.available)
+    if t.short > 0 then line = line .. "  SHORT " .. t.short end
     term.write(line:sub(1, tw))
     y = y + 1
   end
@@ -808,10 +832,10 @@ local function handleRemote(sender, msg)
     if not grid then rednet.send(sender, { ok = false, err = gerr }, REMOTE_PROTO); return end
     local n = math.max(1, tonumber(msg.amount) or recipe.yield)
     local cycles = math.max(1, math.min(64, math.ceil(n / recipe.yield)))
-    local plan, short = planCraft(recipe, cycles)
+    local _, summary, short = planCraft(recipe, cycles)
     local out = {}
-    for _, p in ipairs(plan) do
-      out[#out + 1] = { label = labelFor(p.name), needed = p.needed, available = p.available, short = p.short }
+    for _, t in ipairs(summary) do
+      out[#out + 1] = { label = labelFor(t.name), needed = t.needed, available = t.available, short = t.short }
     end
     rednet.send(sender, { ok = true, cycles = cycles, produced = cycles * recipe.yield, plan = out, short = short }, REMOTE_PROTO)
 
@@ -823,9 +847,9 @@ local function handleRemote(sender, msg)
     if not grid then rednet.send(sender, { ok = false, err = gerr }, REMOTE_PROTO); return end
     local n = math.max(1, tonumber(msg.amount) or recipe.yield)
     local cycles = math.max(1, math.min(64, math.ceil(n / recipe.yield)))
-    local plan, short = planCraft(recipe, cycles)
+    local positions, _, short = planCraft(recipe, cycles)
     if short then rednet.send(sender, { ok = false, err = "missing ingredients" }, REMOTE_PROTO); return end
-    local success, err = runCraft(recipe, cycles, plan)
+    local success, err = runCraft(recipe, cycles, positions)
     rednet.send(sender, { ok = success, err = err, produced = cycles * recipe.yield }, REMOTE_PROTO)
   end
 end
@@ -965,7 +989,7 @@ while true do
         elseif code == keys.enter then
           local n = math.max(1, tonumber(cAmount) or cSelected.yield)
           cCycles = math.max(1, math.min(64, math.ceil(n / cSelected.yield)))
-          cPlan, cShort = planCraft(cSelected, cCycles)
+          cPlan, cSummary, cShort = planCraft(cSelected, cCycles)
           cMode = "confirm"
           drawTerminal()
         end
