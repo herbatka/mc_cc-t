@@ -49,8 +49,23 @@ while true do
       -- Suck `count` of whatever's currently in the staging barrel below
       -- into grid slot `slot`. The main computer only stages one distinct
       -- item at a time, so there's no ambiguity about what gets picked up.
+      --
+      -- suckDown()'s return value only means "moved at least one item", NOT
+      -- "moved exactly `count`" - if the slot's own max stack (a plain
+      -- vanilla ~64, regardless of any storage-side stack upgrades) is
+      -- smaller than what a multi-cycle craft needs, it silently stops
+      -- there and still reports success. Checking the actual count moved
+      -- catches that (and an under-stocked barrel) instead of the caller
+      -- wrongly believing every ingredient loaded in full.
       turtle.select(msg.slot)
-      local ok, err = turtle.suckDown(msg.count)
+      local before = turtle.getItemCount(msg.slot)
+      turtle.suckDown(msg.count)
+      local gotten = turtle.getItemCount(msg.slot) - before
+      local ok = gotten >= msg.count
+      local err = nil
+      if not ok then
+        err = ("only got %d of %d requested (slot maxed out or barrel short)"):format(gotten, msg.count)
+      end
       rednet.send(sender, { ok = ok, err = err }, PROTO)
 
     elseif msg.cmd == "dump" then

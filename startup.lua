@@ -467,6 +467,27 @@ local function resolveRecipeGrid(entry)
   return grid
 end
 
+-- The turtle's own inventory is a plain vanilla 16-slot inventory (~64 max
+-- stack per slot) - completely unrelated to any sophisticatedstorage stack
+-- upgrades on the storage side - and a grid position always maps to the
+-- SAME physical turtle slot. So a batch of `cycles` crafts needs
+-- ingredient.count * cycles to fit in ONE slot for every ingredient, or
+-- turtle.suckDown() silently stops at whatever the slot can actually hold
+-- and reports success anyway (it only tells you SOMETHING moved, not how
+-- much) - which is how a big enough batch could under-craft without this
+-- ever noticing. Capping cycles here turns that into "you can't request
+-- more than fits in one batch" instead of a silent partial craft;
+-- turtle_craft.lua's loadSlot handler also verifies the actual count
+-- moved as a second line of defense, in case an ingredient's real max
+-- stack is smaller than the 64 assumed here (tools, potions, etc).
+local function maxCyclesForGrid(grid)
+  local maxPerCycle = 1
+  for _, ingredient in pairs(grid) do
+    if ingredient.count > maxPerCycle then maxPerCycle = ingredient.count end
+  end
+  return math.max(1, math.floor(64 / maxPerCycle))
+end
+
 -- Pick whichever acceptable item name has the most stock (handles "any
 -- planks"-style ingredients, and resolved tags, without needing to know
 -- which one specifically to prefer).
@@ -973,7 +994,7 @@ local function handleRemote(sender, msg)
     local grid, gerr = resolveRecipeGrid(recipe)
     if not grid then rednet.send(sender, { ok = false, err = gerr }, REMOTE_PROTO); return end
     local n = math.max(1, tonumber(msg.amount) or recipe.yield)
-    local cycles = math.max(1, math.min(64, math.ceil(n / recipe.yield)))
+    local cycles = math.max(1, math.min(64, maxCyclesForGrid(grid), math.ceil(n / recipe.yield)))
     local _, summary, short = planCraft(recipe, cycles)
     if short then findSubCrafts(summary) end
     local out, hasSub = {}, false
@@ -993,7 +1014,7 @@ local function handleRemote(sender, msg)
     local grid, gerr = resolveRecipeGrid(recipe)
     if not grid then rednet.send(sender, { ok = false, err = gerr }, REMOTE_PROTO); return end
     local n = math.max(1, tonumber(msg.amount) or recipe.yield)
-    local cycles = math.max(1, math.min(64, math.ceil(n / recipe.yield)))
+    local cycles = math.max(1, math.min(64, maxCyclesForGrid(grid), math.ceil(n / recipe.yield)))
     local positions, summary, short = planCraft(recipe, cycles)
     -- Default is banked to storage - deliverToOutput is an explicit opt-in,
     -- same as the local UI's Enter (store) vs O (output) keys.
@@ -1120,7 +1141,7 @@ while true do
         elseif code == keys.c then cMode = "list"; drawTerminal()
         elseif code == keys.enter then
           local n = math.max(1, tonumber(cAmount) or cSelected.yield)
-          cCycles = math.max(1, math.min(64, math.ceil(n / cSelected.yield)))
+          cCycles = math.max(1, math.min(64, maxCyclesForGrid(cSelected.grid), math.ceil(n / cSelected.yield)))
           cPlan, cSummary, cShort = planCraft(cSelected, cCycles)
           if cShort then findSubCrafts(cSummary) end
           cHasSub = false
