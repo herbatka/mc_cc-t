@@ -56,26 +56,17 @@ CREATE OR REPLACE VIEW recipes_search AS
   FROM recipes
   WHERE craftable;
 
--- Given a recipe id, returns each grid position with the total count needed
--- and the full list of concrete item ids that would satisfy it (a single
--- item if the ingredient there is a plain item, or the tag's whole
--- membership if it's a tag). This is what the CC:Tweaked side actually
--- calls (via PostgREST's /rpc/ endpoint) - it does the item/tag resolution
--- so the Lua side never needs to know the difference.
-CREATE OR REPLACE FUNCTION recipe_ingredients_resolved(p_recipe_id text)
-RETURNS TABLE(grid_pos smallint, needed_count integer, candidates text[]) AS $$
-  SELECT
-    ri.grid_pos,
-    max(ri.count) AS needed_count,
-    array_agg(DISTINCT candidate) AS candidates
+-- Given a recipe id, returns each grid position's needed count plus the raw
+-- item-or-tag ingredient rows, unresolved. The Lua side expands tags itself
+-- via a single batched /tags?tag=in.(...) lookup covering every distinct tag
+-- in the recipe - resolving tags here instead would mean re-sending a
+-- shared tag's whole membership list once per grid position that uses it
+-- (e.g. 8x over for a chest recipe, ~200KB instead of ~50KB fetched once).
+CREATE OR REPLACE FUNCTION recipe_ingredients_raw(p_recipe_id text)
+RETURNS TABLE(grid_pos smallint, needed_count integer, kind text, ref text) AS $$
+  SELECT ri.grid_pos, ri.count AS needed_count, ri.kind, ri.ref
   FROM recipe_ingredients ri
-  LEFT JOIN LATERAL (
-    SELECT CASE WHEN ri.kind = 'item' THEN ri.ref ELSE t.item END AS candidate
-    FROM (SELECT 1) dummy
-    LEFT JOIN tags t ON ri.kind = 'tag' AND t.tag = ri.ref
-  ) c ON true
   WHERE ri.recipe_id = p_recipe_id
-  GROUP BY ri.grid_pos
   ORDER BY ri.grid_pos;
 $$ LANGUAGE sql STABLE;
 
@@ -98,4 +89,4 @@ END $$;
 GRANT web_anon TO authenticator;
 GRANT USAGE ON SCHEMA public TO web_anon;
 GRANT SELECT ON recipes, recipe_ingredients, tags, recipes_search TO web_anon;
-GRANT EXECUTE ON FUNCTION recipe_ingredients_resolved(text) TO web_anon;
+GRANT EXECUTE ON FUNCTION recipe_ingredients_raw(text) TO web_anon;

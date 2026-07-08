@@ -290,19 +290,72 @@ local function apiSearchRecipes(query, limit)
   return apiGet(path)
 end
 
+-- Fetches the concrete item membership of one or more tags in a single
+-- request, returned as { [tag] = {item, item, ...} }. Batched so a recipe
+-- referencing the same tag from several grid positions (e.g. a chest's 8
+-- plank slots) only pays for that tag's membership list once.
+local function apiFetchTagItems(tags)
+  if #tags == 0 then return {} end
+  local encoded = {}
+  for i, t in ipairs(tags) do encoded[i] = urlEncode(t) end
+  local path = ("/tags?tag=in.(%s)&select=tag,item"):format(table.concat(encoded, ","))
+  local rows, err = apiGet(path)
+  if not rows then return nil, err end
+  local byTag = {}
+  for _, row in ipairs(rows) do
+    if not byTag[row.tag] then byTag[row.tag] = {} end
+    byTag[row.tag][#byTag[row.tag] + 1] = row.item
+  end
+  return byTag
+end
+
 -- Resolves a specific database recipe's ingredients into the same grid
 -- shape as a taught recipe: grid[pos] = { names = {...}, count = n }.
--- Tag-based ingredients are already expanded into their full item list by
--- the recipe_ingredients_resolved() SQL function - this code never needs
--- to know whether a slot was an item or a tag.
+-- recipe_ingredients_raw() returns each slot's raw item/tag reference
+-- rather than pre-expanding tags itself - expanding a tag inline for every
+-- grid position that uses it repeats its entire membership list once per
+-- position (a chest's 8 plank slots would otherwise resend the ~700-item
+-- "any planks" list 8 times for one recipe). Fetching each distinct tag
+-- exactly once here and reusing it keeps that cost fixed regardless of how
+-- many positions share the same tag.
 local function apiResolveIngredients(recipeId)
-  local data, err = apiPost("/rpc/recipe_ingredients_resolved", { p_recipe_id = recipeId })
-  if not data then return nil, err end
-  local grid = {}
-  for _, row in ipairs(data) do
-    grid[row.grid_pos] = { names = row.candidates, count = row.needed_count }
+  local rows, err = apiPost("/rpc/recipe_ingredients_raw", { p_recipe_id = recipeId })
+  if not rows then return nil, err end
+  if #rows == 0 then return nil, "recipe has no ingredients (bad data?)" end
+
+  local neededTags, seen = {}, {}
+  for _, row in ipairs(rows) do
+    if row.kind == "tag" and not seen[row.ref] then
+      seen[row.ref] = true
+      neededTags[#neededTags + 1] = row.ref
+    end
   end
-  if next(grid) == nil then return nil, "recipe has no ingredients (bad data?)" end
+  local tagItems = {}
+  if #neededTags > 0 then
+    local byTag, tagErr = apiFetchTagItems(neededTags)
+    if not byTag then return nil, tagErr end
+    tagItems = byTag
+  end
+
+  local grid = {}
+  for _, row in ipairs(rows) do
+    if not grid[row.grid_pos] then grid[row.grid_pos] = { names = {}, count = row.needed_count } end
+    local names = grid[row.grid_pos].names
+    if row.kind == "item" then
+      names[#names + 1] = row.ref
+    else
+      local items = tagItems[row.ref]
+      if items then
+        for _, it in ipairs(items) do names[#names + 1] = it end
+      end
+    end
+  end
+  -- A tag with zero known members would otherwise leave that slot with no
+  -- candidates at all (crashing resolveIngredient, which expects at least
+  -- one) - fall back to the raw ref so it just shows up as unavailable.
+  for _, entry in pairs(grid) do
+    if #entry.names == 0 then entry.names[1] = "?unresolvable" end
+  end
   return grid
 end
 

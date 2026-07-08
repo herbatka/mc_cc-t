@@ -83,7 +83,7 @@ distro's package manager if it's different.
      --host localhost --dbname mc_recipes --user postgres --password pick-a-password
    ```
    This applies `db/schema.sql` automatically (tables, indexes, the
-   `recipe_ingredients_resolved()` function, and the `web_anon`/
+   `recipe_ingredients_raw()` function, and the `web_anon`/
    `authenticator` roles PostgREST needs), then **fully truncates and
    reloads** all three tables - safe to re-run any time you redo Part 1
    with fresh data.
@@ -170,16 +170,23 @@ to that same URL should now succeed too.
   `(recipe_id, grid_pos)` mean any of them is an acceptable ingredient there.
 - `tags` - `(tag, item)` membership pairs, only for tags actually referenced
   by the recipe dump (not every tag in the game).
-- `recipe_ingredients_resolved(recipe_id)` - a SQL function; given a recipe
-  id, returns each grid position with the count needed and the full list of
-  concrete item ids that would satisfy it (a tag's entire membership, if
-  that slot is tag-based). This is what the CC:Tweaked side actually calls -
-  it never needs to know whether a slot was an item or a tag.
+- `recipe_ingredients_raw(recipe_id)` - a SQL function; given a recipe id,
+  returns each grid position's needed count plus the raw item-or-tag
+  ingredient rows, unresolved. The Lua side resolves tags itself with a
+  single batched `/tags?tag=in.(...)` lookup covering every distinct tag
+  used anywhere in the recipe, rather than asking Postgres to expand each
+  tag inline. That split matters once a tag is reused across several grid
+  positions (e.g. a chest recipe uses a planks tag in all 8 border slots):
+  resolving it in SQL would repeat that tag's entire item list once per
+  position it appears in, while resolving it in Lua fetches it exactly
+  once regardless of how many positions reference it (measured ~200KB vs
+  ~50KB fetched once, for the chest recipe).
 
-Example API calls (what the Lua side will use):
+Example API calls (what the Lua side actually uses):
 ```
 GET  /recipes?craftable=eq.true&output_item=ilike.*chest*&select=id,output_item,output_count
-POST /rpc/recipe_ingredients_resolved   {"p_recipe_id": "minecraft:chest"}
+POST /rpc/recipe_ingredients_raw   {"p_recipe_id": "minecraft:chest"}
+GET  /tags?tag=in.(minecraft:planks,c:dyes/magenta)&select=tag,item
 ```
 
 ## Notes
