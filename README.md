@@ -10,8 +10,17 @@ a screen — Minecraft's client eats Escape (closes the screen) and most
 F-keys (F2 = screenshot, etc.) before a computer program ever sees them, so
 this UI avoids both entirely.
 
-- **Search** — unchanged: type to search your sophisticatedstorage chests,
-  Up/Down to pick, Enter to withdraw an amount.
+- **Search** — type to search your sophisticatedstorage chests, Up/Down to
+  pick, Enter to withdraw an amount. Matches both the item's name (as
+  before) and its tags via the recipe database (see `db/`) - e.g. typing
+  "food" finds items literally named "food" as well as anything tagged
+  `c:foods`/`minecraft:...` /etc. Tag lookups are cached per search string,
+  so retyping/backspacing back to something already searched doesn't hit
+  the database again - only a genuinely new query does. If the database is
+  unreachable, name matching still works exactly as before; a "tag search:"
+  error just shows alongside whatever name matches are found. Same
+  behavior on the pocket remote's Search tab, since it's the same
+  filtering logic on the main computer either way.
 - **Craft** — type a name, Enter to search a recipe database over HTTP (see
   `db/`), Up/Down to pick a match, Enter to select, then type a quantity.
   It shows one summarized line per distinct ingredient — total needed vs.

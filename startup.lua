@@ -106,6 +106,7 @@ local query = ""
 local uiTab = "search"    -- "search" | "craft"
 local tMode, tSel, tScroll, tSelected, tAmount = "browse", 1, 1, nil, ""
 local pollCount, barrelSeen, lastErr = 0, 0, nil   -- import heartbeat / diagnostics
+local tagErr, tagMatchCache = nil, {}   -- Search tab's tag-based matching (see filterBy below)
 local refreshBtn = nil        -- clickable area for the monitor REFRESH button
 
 -- craft tab state
@@ -165,17 +166,6 @@ end
 local function findEntryByName(name)
   return findEntry(name .. "|")
 end
-
-local function filterBy(q)
-  if q == "" then return index end
-  local out, ql = {}, q:lower()
-  for _, e in ipairs(index) do
-    if e.displayName:lower():find(ql, 1, true) then out[#out + 1] = e end
-  end
-  return out
-end
-
-local function applyFilter() filtered = filterBy(query) end
 
 -- Pull everything out of `source` and pack it densely into storage.
 -- Returns the number of items moved. One cheap list() call if source is empty.
@@ -320,6 +310,47 @@ local function apiFetchTagItems(tags)
   end
   return byTag
 end
+
+-- Returns the set of concrete item ids whose tag matches `q` (a substring,
+-- e.g. "food" matches "c:foods"), or nil if none/unreachable. Cached per
+-- distinct query string so re-filtering with an unchanged query (import
+-- polling, stats refresh, backspacing back to a query already seen) never
+-- re-hits the API - only a genuinely new query string does.
+local function tagMatchesFor(q)
+  if q == "" then return nil end
+  local cached = tagMatchCache[q]
+  if not cached then
+    local path = ("/tags?tag=ilike.%s&select=item"):format(urlEncode("*" .. q .. "*"))
+    local rows, err = apiGet(path)
+    if rows then
+      local set = {}
+      for _, row in ipairs(rows) do set[row.item] = true end
+      cached = { set = set }
+    else
+      cached = { err = tostring(err) }
+    end
+    tagMatchCache[q] = cached
+  end
+  tagErr = cached.err
+  return cached.set
+end
+
+-- Matches on item name/displayName (as before) OR on tag membership, so
+-- e.g. typing "food" surfaces both items literally named "food" and any
+-- stored item carrying a tag like "c:foods".
+local function filterBy(q)
+  if q == "" then return index end
+  local out, ql = {}, q:lower()
+  local tagSet = tagMatchesFor(ql)
+  for _, e in ipairs(index) do
+    if e.displayName:lower():find(ql, 1, true) or (tagSet and tagSet[e.name]) then
+      out[#out + 1] = e
+    end
+  end
+  return out
+end
+
+local function applyFilter() filtered = filterBy(query) end
 
 -- Resolves a specific database recipe's ingredients into the same grid
 -- shape as a taught recipe: grid[pos] = { names = {...}, count = n }.
@@ -700,6 +731,8 @@ local function drawSearchTab(tw, th)
   term.setCursorPos(1, 4)
   if lastErr then
     term.setTextColor(colors.red); term.write(("ERR: " .. lastErr):sub(1, tw))
+  elseif tagErr then
+    term.setTextColor(colors.orange); term.write(("tag search: " .. tagErr):sub(1, tw))
   else
     term.setTextColor(colors.gray)
     term.write(("poll #%d   in-barrel: %d"):format(pollCount, barrelSeen):sub(1, tw))
