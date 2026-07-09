@@ -41,6 +41,25 @@ local function req(msg, timeout)
   return reply
 end
 
+-- The main computer now runs a big craft as several turtle.craft() batches
+-- back to back (each capped at 64), so a large request can take a lot
+-- longer than a single batch used to - "no response" within a short
+-- timeout here does NOT mean the craft failed, it's very likely still
+-- running on the main computer regardless of what this remote shows.
+local function craftStatusText(r, requestedAmount, displayName, destLabel)
+  if r and r.ok then
+    return ("Crafted %d x %s (%s)"):format(r.produced or requestedAmount, displayName, destLabel)
+  elseif r then
+    local got = r.produced or 0
+    if got > 0 then
+      return ("Crafted %d of %d x %s (%s), then failed: %s")
+        :format(got, r.requested or requestedAmount, displayName, destLabel, tostring(r.err or "unknown error"))
+    end
+    return "Craft failed: " .. tostring(r.err or "unknown error")
+  end
+  return "No response yet - it may still be crafting on the main computer, check there or try again"
+end
+
 ---------------------------------------------------------------------------
 -- STATE
 ---------------------------------------------------------------------------
@@ -323,27 +342,23 @@ while true do
         if k == keys.c then cMode = "list"
         elseif k == keys.enter and not cShort then
           cstatus = "Crafting..."; draw()
-          local r = req({ cmd = "craftRequest", key = cSelected.key, amount = cProduced }, 10)
-          if r and r.ok then cstatus = ("Crafted %d x %s (stored)"):format(r.produced or cProduced, cSelected.displayName)
-          else cstatus = "Craft failed: " .. tostring((r and r.err) or "no response") end
+          local r = req({ cmd = "craftRequest", key = cSelected.key, amount = cProduced }, 60)
+          cstatus = craftStatusText(r, cProduced, cSelected.displayName, "stored")
           cMode = "status"
         elseif k == keys.o and not cShort then
           cstatus = "Crafting..."; draw()
-          local r = req({ cmd = "craftRequest", key = cSelected.key, amount = cProduced, deliverToOutput = true }, 10)
-          if r and r.ok then cstatus = ("Crafted %d x %s (sent to output)"):format(r.produced or cProduced, cSelected.displayName)
-          else cstatus = "Craft failed: " .. tostring((r and r.err) or "no response") end
+          local r = req({ cmd = "craftRequest", key = cSelected.key, amount = cProduced, deliverToOutput = true }, 60)
+          cstatus = craftStatusText(r, cProduced, cSelected.displayName, "sent to output")
           cMode = "status"
         elseif k == keys.s and cShort and cHasSub then
           cstatus = "Crafting missing ingredients..."; draw()
-          local r = req({ cmd = "craftRequest", key = cSelected.key, amount = cProduced, auto = true }, 15)
-          if r and r.ok then cstatus = ("Crafted %d x %s (stored)"):format(r.produced or cProduced, cSelected.displayName)
-          else cstatus = "Craft failed: " .. tostring((r and r.err) or "no response") end
+          local r = req({ cmd = "craftRequest", key = cSelected.key, amount = cProduced, auto = true }, 90)
+          cstatus = craftStatusText(r, cProduced, cSelected.displayName, "stored")
           cMode = "status"
         elseif k == keys.o and cShort and cHasSub then
           cstatus = "Crafting missing ingredients..."; draw()
-          local r = req({ cmd = "craftRequest", key = cSelected.key, amount = cProduced, auto = true, deliverToOutput = true }, 15)
-          if r and r.ok then cstatus = ("Crafted %d x %s (sent to output)"):format(r.produced or cProduced, cSelected.displayName)
-          else cstatus = "Craft failed: " .. tostring((r and r.err) or "no response") end
+          local r = req({ cmd = "craftRequest", key = cSelected.key, amount = cProduced, auto = true, deliverToOutput = true }, 90)
+          cstatus = craftStatusText(r, cProduced, cSelected.displayName, "sent to output")
           cMode = "status"
         end
       elseif cMode == "status" then
