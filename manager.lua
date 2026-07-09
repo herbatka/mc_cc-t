@@ -250,6 +250,23 @@ local function rebalance()
     end
   end
 
+  -- Global pool of every slot that's genuinely empty right now, anywhere -
+  -- not scoped to any one item's target range. Once storage gets fairly
+  -- full, a target slot being occupied by something that hasn't had its
+  -- own turn yet is the common case, not the exception - without a way to
+  -- displace it somewhere, that slot (and the item that actually belongs
+  -- there) would just sit blocked forever, which is exactly what "N
+  -- stack(s) still waiting on room" staying high run after run means.
+  -- Using any free slot in the whole network as scratch space to evict
+  -- into (rather than requiring the free slot to be within that specific
+  -- range) turns most of those into real, if temporary, progress - the
+  -- displaced item lands somewhere for now and gets its own shot at
+  -- reaching its real target on its own turn (later this run, or next).
+  local freeSlots = {}
+  for _, loc in ipairs(slots) do
+    if not occupant[slotId(loc)] then freeSlots[#freeSlots + 1] = loc end
+  end
+
   local moved, unmovable = 0, 0
   for _, key in ipairs(rankOrder) do
     local range = targets[key] or {}
@@ -269,6 +286,44 @@ local function rebalance()
             if not occupant[slotId(t)] then dest = t; break end
           end
         end
+        if not dest then
+          for _, t in ipairs(range) do
+            local sid = slotId(t)
+            local blocker = occupant[sid]
+            if blocker and blocker ~= key then
+              local scratch = table.remove(freeSlots)
+              if scratch then
+                local blockerCount = slotCount[sid]
+                local m = safePush(t.inv, t.slot, scratch.inv, blockerCount, scratch.slot)
+                if m >= blockerCount then
+                  occupant[sid] = nil; slotCount[sid] = nil
+                  local scratchId = slotId(scratch)
+                  occupant[scratchId] = blocker; slotCount[scratchId] = m
+                  -- The blocker's own bookkeeping has to follow it to its
+                  -- new spot, or its own turn later in this same run (if
+                  -- it hasn't had one yet) would try to move a stack that
+                  -- isn't there anymore.
+                  local blockerInfo = byKey[blocker]
+                  if blockerInfo then
+                    for _, bl in ipairs(blockerInfo.locations) do
+                      if bl.inv == t.inv and bl.slot == t.slot then
+                        bl.inv, bl.slot = scratch.inv, scratch.slot
+                        break
+                      end
+                    end
+                  end
+                  dest = t
+                else
+                  -- partial/failed push (blocker's chest may have vanished,
+                  -- see safePush) - give the scratch slot back, try the
+                  -- next occupied slot in range instead
+                  freeSlots[#freeSlots + 1] = scratch
+                end
+              end
+              if dest then break end
+            end
+          end
+        end
         if dest then
           -- toSlot must be explicit here: without it, pushItems auto-merges
           -- into WHATEVER compatible slot the destination chest happens to
@@ -284,6 +339,7 @@ local function rebalance()
             if m >= loc.count then
               occupant[slotId(loc)] = nil
               slotCount[slotId(loc)] = nil
+              freeSlots[#freeSlots + 1] = loc
             else
               slotCount[slotId(loc)] = loc.count - m
               unmovable = unmovable + 1
