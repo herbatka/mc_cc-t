@@ -208,6 +208,23 @@ local function safePush(fromInv, fromSlot, toName, limit, toSlot)
   return ok and moved or 0
 end
 
+-- Fully settling one item before moving to the next (see rebalance below)
+-- can add up to a lot of pushItems calls with no natural break between
+-- them - CC:Tweaked kills any program that goes too long without yielding
+-- back to the scheduler, so this periodically hands control back with an
+-- event round-trip that resolves instantly (nothing else is listening for
+-- "cg_yield"), instead of an os.sleep() that would actually slow things
+-- down waiting on real ticks.
+local opsSinceYield = 0
+local function maybeYield()
+  opsSinceYield = opsSinceYield + 1
+  if opsSinceYield >= 200 then
+    opsSinceYield = 0
+    os.queueEvent("cg_yield")
+    os.pullEvent("cg_yield")
+  end
+end
+
 -- Distributes whatever's in INPUT across the storages with room, merging
 -- into existing compatible stacks first (pushItems' own behavior) before
 -- using empty slots. Doesn't bother finding "the" existing stack for an
@@ -293,10 +310,13 @@ end
 local rankOrder = {}   -- ordered list of item keys, highest total-count first
 
 -- Drops keys no longer in storage, appends any brand-new key at the bottom
--- (lowest priority to start), then does ONE bubble pass promoting an item
--- only if it beats its neighbor by more than RANK_SWAP_THRESHOLD - so a big
--- new haul climbs toward its real rank gradually over several runs instead
--- of one huge reshuffle, and two close totals don't swap every run.
+-- (lowest priority to start), then bubbles items toward their real rank -
+-- promoting one only once it beats its neighbor by more than
+-- RANK_SWAP_THRESHOLD, so two close totals don't swap every run as they
+-- naturally seesaw during normal play - repeated to FULL convergence (not
+-- just one pass) so the whole list reaches its correct order in a single
+-- call instead of needing as many runs as there are items, which is what
+-- "still not sorted after over a dozen runs" actually was.
 local function updateRankOrder(byKey)
   local seen, newOrder = {}, {}
   for _, key in ipairs(rankOrder) do
@@ -305,10 +325,15 @@ local function updateRankOrder(byKey)
   for key in pairs(byKey) do
     if not seen[key] then newOrder[#newOrder + 1] = key end
   end
-  for i = 1, #newOrder - 1 do
-    local a, b = newOrder[i], newOrder[i + 1]
-    if byKey[b].total > byKey[a].total + RANK_SWAP_THRESHOLD then
-      newOrder[i], newOrder[i + 1] = newOrder[i + 1], newOrder[i]
+  local swapped = true
+  while swapped do
+    swapped = false
+    for i = 1, #newOrder - 1 do
+      local a, b = newOrder[i], newOrder[i + 1]
+      if byKey[b].total > byKey[a].total + RANK_SWAP_THRESHOLD then
+        newOrder[i], newOrder[i + 1] = newOrder[i + 1], newOrder[i]
+        swapped = true
+      end
     end
   end
   rankOrder = newOrder
@@ -335,12 +360,20 @@ end
 
 local function slotId(loc) return loc.inv .. "#" .. loc.slot end
 
--- Moves misplaced stacks toward their assigned target range, highest
--- priority first, into whichever target slot is already empty or already
--- holds the same item - never evicts a different item that hasn't been
--- relocated yet. A stack that can't be freed this run (every target slot
--- still occupied by something else) is simply left for a later run, once
--- whatever's in the way has moved on to its own target.
+-- Fully settles the top-ranked item into its target range first, THEN
+-- moves on to the second-ranked item, and so on - rather than giving every
+-- item just one attempt per stack per run and moving down the list
+-- regardless of whether each one actually finished. That one-attempt-each
+-- approach spread partial progress thin across every item at once instead
+-- of ever finishing one, which is what "still not sorted after 13 runs"
+-- actually was: a stack that could easily have been evicted into free
+-- space right now was instead left for "next run" just because its item's
+-- turn had already passed for this run.
+--
+-- A stack that genuinely can't be freed even after repeatedly retrying
+-- (every target slot still occupied and no free slot anywhere left in the
+-- whole network to evict into) is left for a later run, once whatever's in
+-- the way has had a chance to move on to its own target.
 local function rebalance()
   local byKey = scanByKey()
   local slots = allSlotsOrdered()
@@ -394,92 +427,109 @@ local function rebalance()
     local inRange = {}
     for _, loc in ipairs(range) do inRange[slotId(loc)] = true end
     local itemLabel = prettify(keyItemName(key))
+    local locations = byKey[key].locations
 
-    for _, loc in ipairs(byKey[key].locations) do
-      if not inRange[slotId(loc)] then
-        local dest
-        for _, t in ipairs(range) do
-          local sid = slotId(t)
-          local cap = chestCapacity[t.inv] or DEFAULT_STACK_CAP
-          if occupant[sid] == key and (slotCount[sid] or 0) < cap then dest = t; break end
-        end
-        if not dest then
-          for _, t in ipairs(range) do
-            if not occupant[slotId(t)] then dest = t; break end
-          end
-        end
-        if not dest then
+    -- Keep sweeping this key's still-misplaced stacks until every one of
+    -- them lands in range, or a whole sweep manages to move/evict nothing
+    -- further (genuinely stuck) - `sweeping` only stays true while actual
+    -- progress keeps happening, so this always terminates.
+    local sweeping = true
+    while sweeping do
+      sweeping = false
+      for _, loc in ipairs(locations) do
+        if not inRange[slotId(loc)] then
+          maybeYield()
+          local dest
           for _, t in ipairs(range) do
             local sid = slotId(t)
-            local blocker = occupant[sid]
-            if blocker and blocker ~= key then
-              local scratch = table.remove(freeSlots)
-              if scratch then
-                local blockerCount = slotCount[sid]
-                local m = safePush(t.inv, t.slot, scratch.inv, blockerCount, scratch.slot)
-                if m >= blockerCount then
-                  occupant[sid] = nil; slotCount[sid] = nil
-                  local scratchId = slotId(scratch)
-                  occupant[scratchId] = blocker; slotCount[scratchId] = m
-                  -- The blocker's own bookkeeping has to follow it to its
-                  -- new spot, or its own turn later in this same run (if
-                  -- it hasn't had one yet) would try to move a stack that
-                  -- isn't there anymore.
-                  local blockerInfo = byKey[blocker]
-                  if blockerInfo then
-                    for _, bl in ipairs(blockerInfo.locations) do
-                      if bl.inv == t.inv and bl.slot == t.slot then
-                        bl.inv, bl.slot = scratch.inv, scratch.slot
-                        break
+            local cap = chestCapacity[t.inv] or DEFAULT_STACK_CAP
+            if occupant[sid] == key and (slotCount[sid] or 0) < cap then dest = t; break end
+          end
+          if not dest then
+            for _, t in ipairs(range) do
+              if not occupant[slotId(t)] then dest = t; break end
+            end
+          end
+          if not dest then
+            for _, t in ipairs(range) do
+              local sid = slotId(t)
+              local blocker = occupant[sid]
+              if blocker and blocker ~= key then
+                local scratch = table.remove(freeSlots)
+                if scratch then
+                  local blockerCount = slotCount[sid]
+                  local m = safePush(t.inv, t.slot, scratch.inv, blockerCount, scratch.slot)
+                  if m >= blockerCount then
+                    occupant[sid] = nil; slotCount[sid] = nil
+                    local scratchId = slotId(scratch)
+                    occupant[scratchId] = blocker; slotCount[scratchId] = m
+                    -- The blocker's own bookkeeping has to follow it to its
+                    -- new spot, or its own turn later (if it hasn't had one
+                    -- yet) would try to move a stack that isn't there
+                    -- anymore.
+                    local blockerInfo = byKey[blocker]
+                    if blockerInfo then
+                      for _, bl in ipairs(blockerInfo.locations) do
+                        if bl.inv == t.inv and bl.slot == t.slot then
+                          bl.inv, bl.slot = scratch.inv, scratch.slot
+                          break
+                        end
                       end
                     end
+                    logDetail(("Evict: %dx %s  %s:%d -> %s:%d (clearing space for %s)")
+                      :format(m, prettify(keyItemName(blocker)), t.inv, t.slot, scratch.inv, scratch.slot, itemLabel))
+                    dest = t
+                  else
+                    -- partial/failed push (blocker's chest may have
+                    -- vanished, see safePush) - give the scratch slot back,
+                    -- try the next occupied slot in range instead
+                    freeSlots[#freeSlots + 1] = scratch
                   end
-                  logDetail(("Evict: %dx %s  %s:%d -> %s:%d (clearing space for %s)")
-                    :format(m, prettify(keyItemName(blocker)), t.inv, t.slot, scratch.inv, scratch.slot, itemLabel))
-                  dest = t
-                else
-                  -- partial/failed push (blocker's chest may have vanished,
-                  -- see safePush) - give the scratch slot back, try the
-                  -- next occupied slot in range instead
-                  freeSlots[#freeSlots + 1] = scratch
                 end
+                if dest then break end
               end
-              if dest then break end
+            end
+          end
+          if dest then
+            -- toSlot must be explicit here: without it, pushItems
+            -- auto-merges into WHATEVER compatible slot the destination
+            -- chest happens to have, which can silently differ from the
+            -- exact slot picked above and desync this whole function's
+            -- bookkeeping from reality (verified this causes real
+            -- non-convergent thrashing in testing).
+            local m = safePush(loc.inv, loc.slot, dest.inv, loc.count, dest.slot)
+            if m > 0 then
+              moved = moved + m
+              sweeping = true
+              local destId = slotId(dest)
+              occupant[destId] = key
+              slotCount[destId] = (slotCount[destId] or 0) + m
+              logDetail(("Move: %dx %s  %s:%d -> %s:%d"):format(m, itemLabel, loc.inv, loc.slot, dest.inv, dest.slot))
+              local oldId = slotId(loc)
+              if m >= loc.count then
+                occupant[oldId] = nil
+                slotCount[oldId] = nil
+                freeSlots[#freeSlots + 1] = { inv = loc.inv, slot = loc.slot }
+                loc.inv, loc.slot, loc.count = dest.inv, dest.slot, m
+              else
+                -- Partial: the rest stays put at the source for now (still
+                -- out of range) and gets retried on the next sweep, by
+                -- which point dest may be full and a different slot (empty,
+                -- or freshly evicted) gets tried instead.
+                slotCount[oldId] = loc.count - m
+                loc.count = loc.count - m
+              end
             end
           end
         end
-        if dest then
-          -- toSlot must be explicit here: without it, pushItems auto-merges
-          -- into WHATEVER compatible slot the destination chest happens to
-          -- have, which can silently differ from the exact slot picked
-          -- above and desync this whole function's bookkeeping from reality
-          -- (verified this causes real non-convergent thrashing in testing).
-          local m = safePush(loc.inv, loc.slot, dest.inv, loc.count, dest.slot)
-          moved = moved + m
-          if m > 0 then
-            local destId = slotId(dest)
-            occupant[destId] = key
-            slotCount[destId] = (slotCount[destId] or 0) + m
-            logDetail(("Move: %dx %s  %s:%d -> %s:%d"):format(m, itemLabel, loc.inv, loc.slot, dest.inv, dest.slot))
-            if m >= loc.count then
-              occupant[slotId(loc)] = nil
-              slotCount[slotId(loc)] = nil
-              freeSlots[#freeSlots + 1] = loc
-            else
-              slotCount[slotId(loc)] = loc.count - m
-              unmovable = unmovable + 1
-              logDetail(("Stuck (partial): %s at %s:%d - only %d of %d moved, rest waits for next run")
-                :format(itemLabel, loc.inv, loc.slot, m, loc.count))
-            end
-          else
-            unmovable = unmovable + 1
-            logDetail(("Stuck (push failed): %s at %s:%d -> %s:%d didn't take"):format(itemLabel, loc.inv, loc.slot, dest.inv, dest.slot))
-          end
-        else
-          unmovable = unmovable + 1
-          logDetail(("Stuck (no room): %s at %s:%d - target slots all occupied, no free slot anywhere to evict into")
-            :format(itemLabel, loc.inv, loc.slot))
-        end
+      end
+    end
+
+    for _, loc in ipairs(locations) do
+      if not inRange[slotId(loc)] then
+        unmovable = unmovable + 1
+        logDetail(("Stuck: %s at %s:%d - target slots all occupied, no free slot anywhere to evict into")
+          :format(itemLabel, loc.inv, loc.slot))
       end
     end
   end
