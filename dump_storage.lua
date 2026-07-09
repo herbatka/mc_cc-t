@@ -14,11 +14,22 @@
 
 local OUT_FILE = "storage_dump.txt"
 
+-- Numeric-aware sort so chest_2 sorts before chest_10 (matches manager.lua's
+-- own chest ordering, which is what "priority order" below refers to).
+local function naturalLess(a, b)
+  local abase, anum = a:match("^(.-)(%d+)$")
+  local bbase, bnum = b:match("^(.-)(%d+)$")
+  if abase and bbase and abase == bbase then
+    return tonumber(anum) < tonumber(bnum)
+  end
+  return a < b
+end
+
 local storages = {}
 for _, name in ipairs(peripheral.getNames()) do
   if name:find("^sophisticatedstorage:") then storages[#storages + 1] = name end
 end
-table.sort(storages)
+table.sort(storages, naturalLess)
 
 if #storages == 0 then error("No sophisticatedstorage chests found on this network.", 0) end
 

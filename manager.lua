@@ -64,12 +64,27 @@ if not peripheral.isPresent(INPUT) then error("INPUT '"..INPUT.."' not found", 0
 -- forever since nothing ever re-checked the actual chest list again.
 local storages = {}
 
+-- Plain string sort would put "chest_10" right after "chest_1" and before
+-- "chest_2" (lexicographic, not numeric), so "chest 1" filling first would
+-- visually jump to whatever chest happens to be named _10/_11/etc next
+-- instead of _2 - comparing any trailing number NUMERICALLY instead keeps
+-- chest_1, chest_2, chest_3, ... in the order you'd actually expect
+-- standing in front of them.
+local function naturalLess(a, b)
+  local abase, anum = a:match("^(.-)(%d+)$")
+  local bbase, bnum = b:match("^(.-)(%d+)$")
+  if abase and bbase and abase == bbase then
+    return tonumber(anum) < tonumber(bnum)
+  end
+  return a < b
+end
+
 local function refreshStorages()
   local fresh = {}
   for _, name in ipairs(peripheral.getNames()) do
     if name:find("^sophisticatedstorage:") then fresh[#fresh + 1] = name end
   end
-  table.sort(fresh)
+  table.sort(fresh, naturalLess)
   storages = fresh
 end
 
