@@ -136,19 +136,27 @@ computer, not anything special.
    monitor, if attached, gets the full granular blow-by-blow instead:
    every individual item import, every stack move/eviction during a
    rebalance (with the exact source/destination chest and slot), and every
-   capacity probe result, scrolling like a terminal. No monitor needed for
-   any of this to work - it's purely an optional window into what's
-   happening; the manager runs exactly the same either way.
-5. A monitor also gets a **"SORT NOW" button** pinned to its top row -
-   touch it to make the manager immediately run rebalance() over and over,
-   back to back, until a pass moves nothing (instead of waiting on
-   `REBALANCE_INTERVAL` to tick several times on its own). This computer's
-   terminal prints one summary line per pass while it's running, and a
-   final outcome once it stops: fully settled, stuck because storage is
-   genuinely full (no free slot anywhere left to evict into), or it hit a
-   50-pass safety cap while still making progress (just press it again to
-   keep going). The button survives the monitor scrolling past it, since
-   it's redrawn every time new detail pushes it off-screen.
+   capacity probe result, scrolling like a terminal - wrapping a long line
+   across as many rows as it needs rather than cutting it off, so nothing's
+   lost even on a small monitor (e.g. a 3-block-tall x 4-block-wide one).
+   No monitor needed for any of this to work - it's purely an optional
+   window into what's happening; the manager runs exactly the same either
+   way.
+5. A monitor also gets a **"SORT NOW" button** pinned to its top row, and
+   it's a toggle: touch it once to start the manager running rebalance()
+   over and over, back to back (yielding between each pass so it never
+   trips CC:Tweaked's "too long without yielding" abort, and so import/
+   heartbeat keep working normally in the meantime), instead of waiting on
+   `REBALANCE_INTERVAL` to tick several times on its own. The button turns
+   green and reads "SORTING... (touch to stop)" while it's running -
+   touching it again stops it early. Left alone, it stops on its own once a
+   pass moves nothing: either fully settled, or stuck because storage is
+   genuinely full (no free slot anywhere left to evict into) - the
+   terminal prints one summary line per pass plus a final outcome either
+   way, and there's also a 50-pass safety cap in case it's still making
+   slow progress (touch it again to keep going past that). The button
+   survives the monitor scrolling past it, since it's redrawn every time
+   new detail pushes it off-screen.
 
 Everything logged to the monitor also gets appended to `manager.log` on the
 manager computer's own disk (trimmed back once it gets big, so it can't

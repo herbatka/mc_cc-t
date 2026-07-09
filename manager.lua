@@ -105,21 +105,28 @@ local monitor = peripheral.find("monitor")
 local monitorName = monitor and peripheral.getName(monitor)
 local buttonBounds = nil   -- {x1, x2, y} of the on-screen "SORT NOW" button
 
--- The button lives pinned to row 1. Scrolling the monitor (see logDetail)
--- shifts the WHOLE screen including row 1, so this has to be re-drawn after
--- every scroll, not just once at startup, or the button would scroll away
--- after the first screenful of log lines.
+-- Whether a continuous sort is currently running (toggled by touching the
+-- button - see sortTimer handling in the main loop below). The button's
+-- own label/color reflects this so it reads as a toggle, not a one-shot.
+local sorting = false
+
+-- The button lives pinned to row 1, spanning the whole row so it's easy to
+-- hit. Scrolling the monitor (see logDetail) shifts the WHOLE screen
+-- including row 1, so this has to be re-drawn after every scroll, not just
+-- once at startup, or the button would scroll away after the first
+-- screenful of log lines.
 local function drawSortButton()
   if not monitor then return end
   local w = monitor.getSize()
-  local label = " SORT NOW "
+  local label = sorting and " SORTING... (touch to stop) " or " SORT NOW "
+  if #label > w then label = label:sub(1, w) end
   monitor.setCursorPos(1, 1)
-  monitor.setBackgroundColor(colors.gray)
-  monitor.setTextColor(colors.white)
-  monitor.write(label)
+  monitor.setBackgroundColor(sorting and colors.lime or colors.gray)
+  monitor.setTextColor(sorting and colors.black or colors.white)
+  monitor.write(label .. string.rep(" ", w - #label))
   monitor.setBackgroundColor(colors.black)
   monitor.setTextColor(colors.white)
-  buttonBounds = { x1 = 1, x2 = math.min(w, #label), y = 1 }
+  buttonBounds = { x1 = 1, x2 = w, y = 1 }
 end
 
 if monitor then
@@ -163,15 +170,23 @@ local function logDetail(msg)
   local line = ("[%s] %s"):format(textutils.formatTime(os.time(), true), msg)
   if monitor then
     local w, h = monitor.getSize()
-    local _, y = monitor.getCursorPos()
-    if y >= h then
-      monitor.scroll(1)
-      drawSortButton()   -- scrolling wiped row 1 (the button) - redraw it
-      monitor.setCursorPos(1, h)
-    else
-      monitor.setCursorPos(1, y + 1)
-    end
-    monitor.write(line:sub(1, w))
+    -- A small monitor (e.g. 3 blocks tall x 4 wide) makes most log lines
+    -- wider than the screen - wrap onto as many rows as it takes instead of
+    -- silently cutting the rest of the line off, so nothing's ever lost.
+    local start = 1
+    repeat
+      local chunk = line:sub(start, start + w - 1)
+      local _, y = monitor.getCursorPos()
+      if y >= h then
+        monitor.scroll(1)
+        drawSortButton()   -- scrolling wiped row 1 (the button) - redraw it
+        monitor.setCursorPos(1, h)
+      else
+        monitor.setCursorPos(1, y + 1)
+      end
+      monitor.write(chunk)
+      start = start + w
+    until start > #line
   end
   local f = io.open(LOG_FILE, "a")
   if f then f:write(line, "\n"); f:close() end
@@ -558,37 +573,68 @@ local function probeThenRebalance()
   if probed > 0 or (rok and moved > 0) then notifyMain({ cmd = "storageChanged" }) end
 end
 
--- Manually-triggered convergence loop for the monitor's "SORT NOW" button:
--- keeps calling rebalance() back to back (each pass builds on where the
--- last one left off) until a pass moves nothing, rather than waiting for
--- REBALANCE_INTERVAL to tick several times on its own. A safety cap keeps
--- a storage network that's genuinely too full to ever fully settle (see
--- rebalance's own "no free slot anywhere" case) from looping forever.
+-- Toggled by touching the monitor's button: one rebalance() pass per timer
+-- firing (see sortTimer in the main loop) rather than one tight synchronous
+-- loop, so this yields back to the event loop between passes just like
+-- everything else here does - a long, unbroken run of pushItems calls with
+-- no os.pullEvent in between risks CC:Tweaked's "too long without yielding"
+-- abort, which would kill the whole program partway through a sort instead
+-- of actually finishing it. Driving it off a timer also means import/
+-- heartbeat keep firing normally while a sort is in progress, instead of
+-- INPUT queuing up untouched for however long the sort takes.
+--
+-- Stops on its own once a pass moves nothing (fully settled, or stuck with
+-- no free space anywhere left to evict into), touching the button again
+-- stops it early, and a safety cap keeps a storage network that's
+-- genuinely too full from ever fully settling from looping forever.
 local SORT_MAX_PASSES = 50
+local sortTimer, sortPass, sortTotalMoved = nil, 0, 0
 
-local function sortUntilDone()
-  print("Sort: running until storage is fully settled (SORT NOW pressed)...")
-  local totalMoved = 0
-  for pass = 1, SORT_MAX_PASSES do
-    refreshStorages()
-    local ok, moved, unmovable = pcall(rebalance)
-    if not ok then
-      print("Sort: rebalance error: " .. tostring(moved))
-      return
-    end
-    totalMoved = totalMoved + moved
-    if moved > 0 then notifyMain({ cmd = "storageChanged" }) end
-    print(("Sort: pass %d - moved %d item(s), %d stack(s) still waiting on room"):format(pass, moved, unmovable))
-    if moved == 0 then
-      if unmovable > 0 then
-        print(("Sort: stopped after %d pass(es) - %d stack(s) stuck with no free space anywhere to evict into (storage is essentially full)"):format(pass, unmovable))
-      else
-        print(("Sort: fully settled after %d pass(es), %d item(s) moved total"):format(pass, totalMoved))
-      end
-      return
-    end
+local function stopSorting(reason)
+  sorting = false
+  sortTimer = nil
+  drawSortButton()
+  if reason then print(reason) end
+end
+
+local function startSorting()
+  sorting = true
+  sortPass, sortTotalMoved = 0, 0
+  print("Sort: started (touch SORT NOW again to stop early)")
+  drawSortButton()
+  sortTimer = os.startTimer(0)
+end
+
+local function toggleSorting()
+  if sorting then
+    stopSorting(("Sort: stopped manually after %d pass(es), %d item(s) moved total"):format(sortPass, sortTotalMoved))
+  else
+    startSorting()
   end
-  print(("Sort: stopped after hitting the %d-pass safety cap, %d item(s) moved total (still making progress - press SORT NOW again to continue)"):format(SORT_MAX_PASSES, totalMoved))
+end
+
+local function runSortPass()
+  refreshStorages()
+  sortPass = sortPass + 1
+  local ok, moved, unmovable = pcall(rebalance)
+  if not ok then
+    stopSorting("Sort: rebalance error: " .. tostring(moved))
+    return
+  end
+  sortTotalMoved = sortTotalMoved + moved
+  if moved > 0 then notifyMain({ cmd = "storageChanged" }) end
+  print(("Sort: pass %d - moved %d item(s), %d stack(s) still waiting on room"):format(sortPass, moved, unmovable))
+  if moved == 0 then
+    if unmovable > 0 then
+      stopSorting(("Sort: stopped after %d pass(es) - %d stack(s) stuck with no free space anywhere to evict into (storage is essentially full)"):format(sortPass, unmovable))
+    else
+      stopSorting(("Sort: fully settled after %d pass(es), %d item(s) moved total"):format(sortPass, sortTotalMoved))
+    end
+  elseif sortPass >= SORT_MAX_PASSES then
+    stopSorting(("Sort: stopped after hitting the %d-pass safety cap, %d item(s) moved total (still making progress - touch SORT NOW again to continue)"):format(SORT_MAX_PASSES, sortTotalMoved))
+  else
+    sortTimer = os.startTimer(0)
+  end
 end
 
 term.clear(); term.setCursorPos(1, 1)
@@ -636,12 +682,15 @@ while true do
     elseif ev[2] == heartbeatTimer then
       notifyMain({ cmd = "heartbeat" })
       heartbeatTimer = os.startTimer(HEARTBEAT_INTERVAL)
+
+    elseif sorting and ev[2] == sortTimer then
+      runSortPass()
     end
 
   elseif ev[1] == "monitor_touch" and monitorName and ev[2] == monitorName then
     local x, y = ev[3], ev[4]
     if buttonBounds and y == buttonBounds.y and x >= buttonBounds.x1 and x <= buttonBounds.x2 then
-      sortUntilDone()
+      toggleSorting()
     end
   end
 end
