@@ -122,6 +122,7 @@ local cFiltered = {}
 local cQuery = ""
 local cMode, cSel, cScroll, cSelected, cAmount = "search", 1, 1, nil, ""
 local cSummary, cCycles, cShort, cHasSub = {}, 1, false, false
+local cProgPhase, cProgDone, cProgTotal = "", 0, 0   -- live crafting progress
 local cStatusMsg = turtleOk and nil
   or ("No staging barrel found at " .. TURTLE_STAGING .. " (see README).")
 
@@ -609,7 +610,10 @@ end
 -- routing it to OUTPUT. Used for the one-level auto-craft-missing-ingredient
 -- flow below, where the "output" is really just an intermediate ingredient
 -- for the craft the player actually asked for.
-local function runCraft(recipe, cycles, plan, keepInStorage)
+-- onProgress(phase), if given, is called with a short human-readable phase
+-- string ("Moving Gold Nugget...", "Crafting...", "Collecting...") right
+-- before each step - purely cosmetic, for a live progress display.
+local function runCraft(recipe, cycles, plan, keepInStorage, onProgress)
   local groups, order = {}, {}
   for _, p in ipairs(plan) do
     if not groups[p.name] then groups[p.name] = {}; order[#order + 1] = p.name end
@@ -620,6 +624,7 @@ local function runCraft(recipe, cycles, plan, keepInStorage)
     local entries = groups[name]
     local total = 0
     for _, p in ipairs(entries) do total = total + p.needed end
+    if onProgress then onProgress("Moving " .. labelFor(name) .. "...") end
     pushToBarrel(name, total)
     buildIndex(); applyFilter()
     for _, p in ipairs(entries) do
@@ -631,7 +636,9 @@ local function runCraft(recipe, cycles, plan, keepInStorage)
     end
   end
 
+  if onProgress then onProgress("Crafting...") end
   local craftOk, craftErr = turtleCraft(cycles)
+  if onProgress then onProgress("Collecting output...") end
   collectFromTurtle((craftOk and not keepInStorage) and recipe.output or nil)
 
   return craftOk, craftErr
@@ -647,13 +654,20 @@ end
 -- fails partway (e.g. ingredients run out before the full request is
 -- done). Re-plans fresh for each batch since consuming stock in one batch
 -- affects what's available for the next.
-local function runCraftBatched(recipe, totalCycles, keepInStorage)
+-- onProgress(phase, cyclesDoneSoFar, cyclesTotal), if given, is called at
+-- each phase transition within the CURRENT batch - the done/total numbers
+-- reflect fully-completed prior batches, so a progress bar built from them
+-- only advances once a whole batch actually finishes, while the phase text
+-- shows what the in-flight batch is doing right now.
+local function runCraftBatched(recipe, totalCycles, keepInStorage, onProgress)
   local batchCap = math.max(1, math.min(64, maxCyclesForGrid(recipe.grid)))
   local remaining, done = totalCycles, 0
   while remaining > 0 do
     local batch = math.min(batchCap, remaining)
     local positions = planCraft(recipe, batch)
-    local ok, err = runCraft(recipe, batch, positions, keepInStorage)
+    local ok, err = runCraft(recipe, batch, positions, keepInStorage, onProgress and function(phase)
+      onProgress(phase, done, totalCycles)
+    end)
     if not ok then
       return false, done, totalCycles, err
     end
@@ -695,10 +709,13 @@ end
 -- Both the sub-crafts and the final craft run through runCraftBatched, so
 -- a sub-craft needing a large amount (or the main craft itself) isn't
 -- limited to one turtle.craft() call's 64-cycle cap either.
-local function craftResolvingShort(recipe, cycles, summary, keepInStorage)
+local function craftResolvingShort(recipe, cycles, summary, keepInStorage, onProgress)
   for _, t in ipairs(summary) do
     if t.sub then
-      local ok, done, total, err = runCraftBatched(t.sub.recipe, t.sub.cycles, true)
+      local subOnProgress = onProgress and function(phase, d, tt)
+        onProgress(("[missing: %s] %s"):format(labelFor(t.name), phase), d, tt)
+      end
+      local ok, done, total, err = runCraftBatched(t.sub.recipe, t.sub.cycles, true, subOnProgress)
       if not ok then
         return false, 0, cycles,
           ("couldn't craft %s (got %d/%d): %s"):format(labelFor(t.name), done, total, tostring(err))
@@ -707,7 +724,7 @@ local function craftResolvingShort(recipe, cycles, summary, keepInStorage)
   end
   local positions, _, short = planCraft(recipe, cycles)
   if short then return false, 0, cycles, "still missing ingredients after auto-crafting" end
-  return runCraftBatched(recipe, cycles, keepInStorage)
+  return runCraftBatched(recipe, cycles, keepInStorage, onProgress)
 end
 
 -- Formats a craft result covering all three outcomes: fully done, partially
@@ -934,6 +951,23 @@ local function drawCraftConfirm(tw)
   end
 end
 
+local function drawCraftProgress(tw)
+  term.setCursorBlink(false)
+  term.setCursorPos(1, 2); term.setTextColor(colors.cyan)
+  term.write(("Crafting %d x %s"):format(cCycles * cSelected.yield, cSelected.displayName):sub(1, tw))
+  term.setCursorPos(1, 4); term.setTextColor(colors.yellow)
+  term.write(cProgPhase:sub(1, tw))
+
+  local barWidth = math.max(10, math.min(tw, 40))
+  local frac = (cProgTotal > 0) and (cProgDone / cProgTotal) or 0
+  local filled = math.floor(barWidth * frac + 0.5)
+  term.setCursorPos(1, 6); term.setTextColor(colors.green)
+  term.write(("[%s%s]"):format(string.rep("=", filled), string.rep("-", barWidth - filled)):sub(1, tw))
+
+  term.setCursorPos(1, 7); term.setTextColor(colors.gray)
+  term.write(("%d / %d crafted"):format(cProgDone * cSelected.yield, cProgTotal * cSelected.yield):sub(1, tw))
+end
+
 local function drawCraftStatus(tw)
   term.setCursorBlink(false)
   term.setCursorPos(1, 2); term.setTextColor(colors.cyan)
@@ -960,6 +994,7 @@ local function drawTerminal()
     elseif cMode == "search" or cMode == "list" then drawCraftBrowse(tw, th)
     elseif cMode == "amount" then drawCraftAmount(tw)
     elseif cMode == "confirm" then drawCraftConfirm(tw)
+    elseif cMode == "progress" then drawCraftProgress(tw)
     elseif cMode == "status" then drawCraftStatus(tw)
     end
   end
@@ -1198,28 +1233,24 @@ while true do
         end
       elseif cMode == "confirm" then
         if code == keys.c then cMode = "list"; drawTerminal()
-        elseif code == keys.enter and not cShort then
-          local success, done, total, err = runCraftBatched(cSelected, cCycles, true)
-          cStatusMsg = craftStatusMsg(success, done, total, cSelected, "stored", err)
-          cMode = "status"
+        elseif (code == keys.enter and not cShort) or (code == keys.o and not cShort)
+            or (code == keys.s and cShort and cHasSub) or (code == keys.o and cShort and cHasSub) then
+          local toOutput = (code == keys.o)
+          local destLabel = toOutput and "sent to output" or "stored"
+          cProgPhase, cProgDone, cProgTotal = "Starting...", 0, cCycles
+          cMode = "progress"
           drawTerminal()
-        elseif code == keys.o and not cShort then
-          local success, done, total, err = runCraftBatched(cSelected, cCycles, false)
-          cStatusMsg = craftStatusMsg(success, done, total, cSelected, "sent to output", err)
-          cMode = "status"
-          drawTerminal()
-        elseif code == keys.s and cShort and cHasSub then
-          cStatusMsg = "Crafting missing ingredients..."
-          drawTerminal()
-          local success, done, total, err = craftResolvingShort(cSelected, cCycles, cSummary, true)
-          cStatusMsg = craftStatusMsg(success, done, total, cSelected, "stored", err)
-          cMode = "status"
-          drawTerminal()
-        elseif code == keys.o and cShort and cHasSub then
-          cStatusMsg = "Crafting missing ingredients..."
-          drawTerminal()
-          local success, done, total, err = craftResolvingShort(cSelected, cCycles, cSummary, false)
-          cStatusMsg = craftStatusMsg(success, done, total, cSelected, "sent to output", err)
+          local function onProgress(phase, done, total)
+            cProgPhase, cProgDone, cProgTotal = phase, done, total
+            drawTerminal()
+          end
+          local success, done, total, err
+          if cShort then
+            success, done, total, err = craftResolvingShort(cSelected, cCycles, cSummary, not toOutput, onProgress)
+          else
+            success, done, total, err = runCraftBatched(cSelected, cCycles, not toOutput, onProgress)
+          end
+          cStatusMsg = craftStatusMsg(success, done, total, cSelected, destLabel, err)
           cMode = "status"
           drawTerminal()
         end

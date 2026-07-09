@@ -41,6 +41,10 @@ this UI avoids both entirely.
   the full amount's done, or until it runs out of an ingredient partway -
   in which case the status screen says exactly how many it actually got
   before that happened, rather than claiming success for the full amount.
+  While it's running, a live progress screen shows what's happening right
+  now (`Moving Gold Nugget...`, `Crafting...`, `Collecting output...`) plus
+  a progress bar that fills in as each full batch finishes - useful for
+  anything that takes more than one batch, since those can take a while.
 - **Missing an ingredient?** If a short ingredient has its own craftable
   recipe *and* that recipe's own ingredients are fully in stock right now,
   it's marked with a `*` and pressing **S** crafts the missing
