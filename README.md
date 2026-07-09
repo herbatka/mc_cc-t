@@ -164,6 +164,13 @@ fill up the computer's storage) - run `pastebin put manager.log` directly
 on that computer's terminal any time to get a shareable link for
 troubleshooting, no copy-pasting needed.
 
+There's also `dump_storage.lua`, a standalone one-off tool (not part of the
+running system) that writes an exact snapshot of every chest's contents,
+slot by slot, plus totals per item, to `storage_dump.txt` - copy it onto any
+networked computer and run `dump_storage`, then `pastebin put
+storage_dump.txt` to get a shareable link. Useful for seeing exactly what's
+where without guessing, e.g. when troubleshooting the rebalancing layout.
+
 From then on, `manager.lua`:
 - **Imports INPUT** every couple seconds, same as the main computer used to
   - distributing dropped items into whichever chests have room, merging
@@ -177,22 +184,22 @@ From then on, `manager.lua`:
   (spilling into the next chest if it doesn't fit), and so on. So with
   enough items and enough runs you get "chest 1 is all Ancient Stone, then
   Diamond, then Raw Copper, ..." rather than just tidier chaos.
-  - This doesn't try to achieve the exact target order in one pass -
-    displacing a lower-priority item can itself require displacing whatever
-    was already sitting where it needs to go, so it moves what it safely
-    can each run (into an empty slot, one already holding the same item, or
-    by evicting whatever's in the way to any free slot elsewhere in the
-    whole network so the rightful item can take its spot) and leaves
-    anything still stuck for the next run, converging gradually. A big
-    inventory change can take a few cycles to fully settle.
-  - The status log's "N stack(s) still waiting on room" is exactly this -
-    a target slot occupied by something that hasn't had its turn yet. It
-    should trend toward 0 over a few runs as long as there's at least a
-    little free space *somewhere* in storage; if it stays stubbornly high,
-    storage itself is probably close to completely full (every single
-    slot occupied, nowhere at all to even temporarily park anything) -
-    freeing up some room (or adding another chest) is what unblocks it,
-    same as a 15-puzzle needs at least one empty space to shuffle at all.
+  - It fully sorts the top-ranked item into place FIRST - evicting whatever
+    it takes, retrying as many times as it takes - before moving on to the
+    second-ranked item, then the third, and so on, so a single run finishes
+    as much of the whole layout as the available free space allows, rather
+    than giving every item one attempt each and leaving most of them still
+    misplaced run after run.
+  - The status log's "N stack(s) still waiting on room" means a stack that
+    genuinely couldn't be freed even after retrying - every one of its
+    target slots occupied by something that hasn't had its own turn yet,
+    and no free slot anywhere left in the whole network to evict into. That
+    should now be rare and should clear on the very next run once whatever
+    was in the way has had its turn; if it stays stubbornly high, storage
+    itself is probably close to completely full (every single slot
+    occupied, nowhere at all to even temporarily park anything) - freeing
+    up some room (or adding another chest) is what unblocks it, same as a
+    15-puzzle needs at least one empty space to shuffle at all.
   - Rankings have a deadzone (`RANK_SWAP_THRESHOLD`, 64 by default): an item
     only overtakes its neighbor once it beats it by more than that many
     items, so two items with close totals don't swap chest position back
