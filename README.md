@@ -204,6 +204,16 @@ From then on, `manager.lua`:
     only overtakes its neighbor once it beats it by more than that many
     items, so two items with close totals don't swap chest position back
     and forth every run as their counts naturally seesaw during play.
+  - **One-off unique-NBT loot never competes with real resources for chest
+    position.** Randomized-affix loot, enchanted books, potions, trophies,
+    damaged tools, etc. are each technically a different item to the game
+    (their NBT differs), so they never meaningfully stack - a base with a
+    lot of that kind of loot could otherwise end up with hundreds of
+    single-digit-count entries scattered through the rank order, occasionally
+    landing one in the middle of actual bulk resources. These always sort
+    below every plain item instead, no matter their own count, so they
+    consistently end up occupying the tail end of storage as a block,
+    leaving the front ranked purely by real resource totals.
   - **Stack sizes are discovered per chest, not assumed.** CC:Tweaked has no
     "what's this slot's real capacity" query, and sophisticatedstorage's
     stack upgrades raise that capacity per chest well past vanilla's 64 -
