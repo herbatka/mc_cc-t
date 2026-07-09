@@ -51,12 +51,26 @@ if not peripheral.isPresent(INPUT) then error("INPUT '"..INPUT.."' not found", 0
 -- Sorted for a stable, deterministic chest order across reboots - "chest 1"
 -- below means whichever chest sorts first alphabetically by peripheral
 -- name, not necessarily whichever one you think of as first physically.
+--
+-- Re-scanned at the start of every timer firing (see refreshStorages
+-- below) rather than only once at startup - a chest broken, moved, or
+-- disconnected hours into a run used to leave a permanently stale entry
+-- here, and every subsequent pushItems() call naming it hard-errors
+-- ("Target '...' does not exist"), which used to spam that same error
+-- forever since nothing ever re-checked the actual chest list again.
 local storages = {}
-for _, name in ipairs(peripheral.getNames()) do
-  if name:find("^sophisticatedstorage:") then storages[#storages + 1] = name end
+
+local function refreshStorages()
+  local fresh = {}
+  for _, name in ipairs(peripheral.getNames()) do
+    if name:find("^sophisticatedstorage:") then fresh[#fresh + 1] = name end
+  end
+  table.sort(fresh)
+  storages = fresh
 end
+
+refreshStorages()
 if #storages == 0 then error("No sophisticatedstorage chests found.", 0) end
-table.sort(storages)
 
 local opened = false
 for _, name in ipairs(peripheral.getNames()) do
@@ -73,6 +87,20 @@ local function notifyMain(msg)
   if mainId then rednet.send(mainId, msg, MANAGER_PROTO) end
 end
 
+-- pushItems() throws a hard error if its target has vanished since it was
+-- last seen (a chest broken/moved/disconnected in the moment between
+-- refreshStorages() and actually using it - a narrow window, but the
+-- source of the very error that motivated refreshStorages() in the first
+-- place). Treating that the same as "0 moved" keeps one missing chest
+-- from crashing an entire import/rebalance/probe pass instead of just
+-- skipping that one move and continuing.
+local function safePush(fromInv, fromSlot, toName, limit, toSlot)
+  local inv = peripheral.wrap(fromInv)
+  if not inv then return 0 end
+  local ok, moved = pcall(inv.pushItems, toName, fromSlot, limit, toSlot)
+  return ok and moved or 0
+end
+
 -- Distributes whatever's in INPUT across the storages with room, merging
 -- into existing compatible stacks first (pushItems' own behavior) before
 -- using empty slots. Doesn't bother finding "the" existing stack for an
@@ -87,7 +115,7 @@ local function importFromInput()
     local remaining = item.count
     for _, name in ipairs(storages) do
       if remaining <= 0 then break end
-      local m = inv.pushItems(name, slot, remaining)
+      local m = safePush(INPUT, slot, name, remaining)
       remaining = remaining - m
       moved = moved + m
     end
@@ -117,14 +145,16 @@ local function scanByKey()
   local byKey = {}
   for _, name in ipairs(storages) do
     local inv = peripheral.wrap(name)
-    chestCapacity[name] = chestCapacity[name] or DEFAULT_STACK_CAP
-    for slot, item in pairs(inv.list()) do
-      local k = keyOf(item)
-      if not byKey[k] then byKey[k] = { total = 0, locations = {} } end
-      byKey[k].total = byKey[k].total + item.count
-      local locs = byKey[k].locations
-      locs[#locs + 1] = { inv = name, slot = slot, count = item.count }
-      if item.count > chestCapacity[name] then chestCapacity[name] = item.count end
+    if inv then   -- skip a chest that vanished since refreshStorages() ran
+      chestCapacity[name] = chestCapacity[name] or DEFAULT_STACK_CAP
+      for slot, item in pairs(inv.list()) do
+        local k = keyOf(item)
+        if not byKey[k] then byKey[k] = { total = 0, locations = {} } end
+        byKey[k].total = byKey[k].total + item.count
+        local locs = byKey[k].locations
+        locs[#locs + 1] = { inv = name, slot = slot, count = item.count }
+        if item.count > chestCapacity[name] then chestCapacity[name] = item.count end
+      end
     end
   end
   return byKey
@@ -137,8 +167,10 @@ local function allSlotsOrdered()
   local slots = {}
   for _, name in ipairs(storages) do
     local inv = peripheral.wrap(name)
-    for slot = 1, inv.size() do
-      slots[#slots + 1] = { inv = name, slot = slot }
+    if inv then   -- skip a chest that vanished since refreshStorages() ran
+      for slot = 1, inv.size() do
+        slots[#slots + 1] = { inv = name, slot = slot }
+      end
     end
   end
   return slots
@@ -243,7 +275,7 @@ local function rebalance()
           -- have, which can silently differ from the exact slot picked
           -- above and desync this whole function's bookkeeping from reality
           -- (verified this causes real non-convergent thrashing in testing).
-          local m = peripheral.wrap(loc.inv).pushItems(dest.inv, loc.slot, loc.count, dest.slot)
+          local m = safePush(loc.inv, loc.slot, dest.inv, loc.count, dest.slot)
           moved = moved + m
           if m > 0 then
             local destId = slotId(dest)
@@ -287,33 +319,35 @@ local function probeCapacities()
 
   local probed = 0
   for _, name in ipairs(storages) do
+    local inv = peripheral.wrap(name)   -- nil if this chest vanished mid-run
     local info = scanByKey()[bestKey]
     if not info then break end
 
-    local targetSlot
-    for _, loc in ipairs(info.locations) do
-      if loc.inv == name then targetSlot = loc.slot; break end
-    end
-    if not targetSlot then
-      local inv = peripheral.wrap(name)
-      local contents = inv.list()
-      for slot = 1, inv.size() do
-        if not contents[slot] then targetSlot = slot; break end
-      end
-    end
-
-    if targetSlot then
+    if inv then
+      local targetSlot
       for _, loc in ipairs(info.locations) do
-        if not (loc.inv == name and loc.slot == targetSlot) then
-          peripheral.wrap(loc.inv).pushItems(name, loc.slot, loc.count, targetSlot)
+        if loc.inv == name then targetSlot = loc.slot; break end
+      end
+      if not targetSlot then
+        local contents = inv.list()
+        for slot = 1, inv.size() do
+          if not contents[slot] then targetSlot = slot; break end
         end
       end
-      local landed = peripheral.wrap(name).list()[targetSlot]
-      local observed = landed and landed.count or 0
-      if observed > (chestCapacity[name] or DEFAULT_STACK_CAP) then
-        chestCapacity[name] = observed
+
+      if targetSlot then
+        for _, loc in ipairs(info.locations) do
+          if not (loc.inv == name and loc.slot == targetSlot) then
+            safePush(loc.inv, loc.slot, name, loc.count, targetSlot)
+          end
+        end
+        local landed = inv.list()[targetSlot]
+        local observed = landed and landed.count or 0
+        if observed > (chestCapacity[name] or DEFAULT_STACK_CAP) then
+          chestCapacity[name] = observed
+        end
+        probed = probed + 1
       end
-      probed = probed + 1
     end
   end
   return probed
@@ -359,6 +393,7 @@ while true do
   local ev = { os.pullEvent() }
   if ev[1] == "timer" then
     if ev[2] == importTimer then
+      refreshStorages()
       local ok, result = pcall(importFromInput)
       if ok and result > 0 then
         print(("imported %d item(s)"):format(result))
@@ -369,6 +404,7 @@ while true do
       importTimer = os.startTimer(IMPORT_INTERVAL)
 
     elseif ev[2] == rebalanceTimer then
+      refreshStorages()
       local ok, moved, unmovable = pcall(rebalance)
       if ok then
         if moved > 0 then
@@ -381,6 +417,7 @@ while true do
       rebalanceTimer = os.startTimer(REBALANCE_INTERVAL)
 
     elseif ev[2] == probeTimer then
+      refreshStorages()
       probeThenRebalance()
       probeTimer = os.startTimer(PROBE_INTERVAL)
 

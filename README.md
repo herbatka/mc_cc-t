@@ -169,6 +169,13 @@ From then on, `manager.lua`:
   waiting for its own periodic resync. The Search tab shows how long ago it
   last heard from the manager (`manager: Ns ago` / `manager: not seen`), so
   it's obvious if the manager computer is off or unreachable.
+- **Re-checks which chests actually exist before every import/rebalance/
+  probe cycle.** Breaking, moving, or disconnecting a chest while the
+  manager's mid-run used to leave it stuck referencing a chest that no
+  longer exists, erroring on every single cycle from then on (visible as
+  a repeating `Target '...' does not exist` error) - it now just drops
+  that chest from the list on the next cycle and carries on with the rest,
+  and picks up any newly-added chest the same way.
 
 If the manager computer is off, INPUT just queues up untouched until it's
 back - the main computer has no fallback import path of its own anymore, by
