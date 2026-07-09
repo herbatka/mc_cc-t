@@ -129,19 +129,32 @@ computer, not anything special.
    **`startup.lua`**, then reboot so it runs automatically.
 3. Reboot the main computer too, so it picks up rednet hosting for the new
    `cg_manager` protocol this computer listens on.
-4. Optionally, attach a monitor to the same network - the manager mirrors
-   everything it logs onto it live (scrolling like a terminal), so you can
-   watch exactly what it's doing: every individual item import, every
-   stack move/eviction during a rebalance (with the exact source/destination
-   chest and slot), and every capacity probe result. No monitor needed for
+4. Optionally, attach a monitor to the same network. This computer's own
+   terminal deliberately stays quiet, showing only coarse batch-level
+   summaries ("Rebalance complete: moved 40 item(s), 3 stack(s) still
+   waiting on room", import/probe errors, etc.) - same as before. The
+   monitor, if attached, gets the full granular blow-by-blow instead:
+   every individual item import, every stack move/eviction during a
+   rebalance (with the exact source/destination chest and slot), and every
+   capacity probe result, scrolling like a terminal. No monitor needed for
    any of this to work - it's purely an optional window into what's
-   happening, same log either way.
+   happening; the manager runs exactly the same either way.
+5. A monitor also gets a **"SORT NOW" button** pinned to its top row -
+   touch it to make the manager immediately run rebalance() over and over,
+   back to back, until a pass moves nothing (instead of waiting on
+   `REBALANCE_INTERVAL` to tick several times on its own). This computer's
+   terminal prints one summary line per pass while it's running, and a
+   final outcome once it stops: fully settled, stuck because storage is
+   genuinely full (no free slot anywhere left to evict into), or it hit a
+   50-pass safety cap while still making progress (just press it again to
+   keep going). The button survives the monitor scrolling past it, since
+   it's redrawn every time new detail pushes it off-screen.
 
-Everything logged also gets appended to `manager.log` on the manager
-computer's own disk (trimmed back once it gets big, so it can't fill up
-the computer's storage) - run `pastebin put manager.log` directly on that
-computer's terminal any time to get a shareable link for troubleshooting,
-no copy-pasting needed.
+Everything logged to the monitor also gets appended to `manager.log` on the
+manager computer's own disk (trimmed back once it gets big, so it can't
+fill up the computer's storage) - run `pastebin put manager.log` directly
+on that computer's terminal any time to get a shareable link for
+troubleshooting, no copy-pasting needed.
 
 From then on, `manager.lua`:
 - **Imports INPUT** every couple seconds, same as the main computer used to
