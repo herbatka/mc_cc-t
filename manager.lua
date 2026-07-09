@@ -101,6 +101,18 @@ local mainId = nil   -- resolved lazily; startup.lua might not be booted yet
 
 local function keyOf(item) return item.name .. "|" .. (item.nbt or "") end
 local function keyItemName(key) return key:match("^([^|]*)") or key end
+-- True for one-off/unique-NBT items (enchanted books, randomized-affix
+-- loot, potions, trophies, damaged tools, ...) - each is technically a
+-- different item to the game since its NBT differs, so it never stacks
+-- meaningfully and would otherwise clutter the rank order with hundreds of
+-- single-digit-count entries fighting for their own chest position. These
+-- always rank below every plain item regardless of count (see
+-- updateRankOrder) instead of being placed purely by total, which with
+-- enough of them could still land one in the middle of real resources.
+local function keyHasNbt(key)
+  local nbt = key:match("|(.*)$")
+  return nbt ~= nil and nbt ~= ""
+end
 local function prettify(name)
   local short = name:gsub("^.-:", ""):gsub("_", " ")
   return (short:gsub("(%a)([%w']*)", function(f, r) return f:upper() .. r end))
@@ -332,6 +344,13 @@ local rankOrder = {}   -- ordered list of item keys, highest total-count first
 -- just one pass) so the whole list reaches its correct order in a single
 -- call instead of needing as many runs as there are items, which is what
 -- "still not sorted after over a dozen runs" actually was.
+--
+-- NBT-bearing items always sort below every plain item, full stop, no
+-- threshold - a real bulk resource must never end up ranked behind one-off
+-- unique loot no matter how many of the latter there are, so this swap
+-- rule ignores RANK_SWAP_THRESHOLD entirely whenever the two sides of a
+-- comparison are in different tiers (only applying the hysteresis
+-- threshold within a tier, same as before).
 local function updateRankOrder(byKey)
   local seen, newOrder = {}, {}
   for _, key in ipairs(rankOrder) do
@@ -345,7 +364,14 @@ local function updateRankOrder(byKey)
     swapped = false
     for i = 1, #newOrder - 1 do
       local a, b = newOrder[i], newOrder[i + 1]
-      if byKey[b].total > byKey[a].total + RANK_SWAP_THRESHOLD then
+      local aJunk, bJunk = keyHasNbt(a), keyHasNbt(b)
+      local shouldSwap
+      if aJunk ~= bJunk then
+        shouldSwap = aJunk   -- junk sitting ahead of a plain item always swaps back
+      else
+        shouldSwap = byKey[b].total > byKey[a].total + RANK_SWAP_THRESHOLD
+      end
+      if shouldSwap then
         newOrder[i], newOrder[i + 1] = newOrder[i + 1], newOrder[i]
         swapped = true
       end
