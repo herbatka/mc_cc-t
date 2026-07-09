@@ -121,7 +121,7 @@ local refreshBtn = nil        -- clickable area for the monitor REFRESH button
 local cFiltered = {}
 local cQuery = ""
 local cMode, cSel, cScroll, cSelected, cAmount = "search", 1, 1, nil, ""
-local cPlan, cSummary, cCycles, cShort, cHasSub = {}, {}, 1, false, false
+local cSummary, cCycles, cShort, cHasSub = {}, 1, false, false
 local cStatusMsg = turtleOk and nil
   or ("No staging barrel found at " .. TURTLE_STAGING .. " (see README).")
 
@@ -470,16 +470,16 @@ end
 -- The turtle's own inventory is a plain vanilla 16-slot inventory (~64 max
 -- stack per slot) - completely unrelated to any sophisticatedstorage stack
 -- upgrades on the storage side - and a grid position always maps to the
--- SAME physical turtle slot. So a batch of `cycles` crafts needs
+-- SAME physical turtle slot. So a single BATCH of `cycles` crafts needs
 -- ingredient.count * cycles to fit in ONE slot for every ingredient, or
 -- turtle.suckDown() silently stops at whatever the slot can actually hold
 -- and reports success anyway (it only tells you SOMETHING moved, not how
--- much) - which is how a big enough batch could under-craft without this
--- ever noticing. Capping cycles here turns that into "you can't request
--- more than fits in one batch" instead of a silent partial craft;
--- turtle_craft.lua's loadSlot handler also verifies the actual count
--- moved as a second line of defense, in case an ingredient's real max
--- stack is smaller than the 64 assumed here (tools, potions, etc).
+-- much). This is the safe per-BATCH cap runCraftBatched() uses to split a
+-- bigger request into multiple turtle.craft() calls - it does NOT limit
+-- how much the player can ask for overall, only how much fits in one
+-- physical batch. turtle_craft.lua's loadSlot handler also verifies the
+-- actual count moved as a second line of defense, in case an ingredient's
+-- real max stack is smaller than the 64 assumed here (tools, potions, etc).
 local function maxCyclesForGrid(grid)
   local maxPerCycle = 1
   for _, ingredient in pairs(grid) do
@@ -637,6 +637,32 @@ local function runCraft(recipe, cycles, plan, keepInStorage)
   return craftOk, craftErr
 end
 
+-- turtle.craft()'s own limit tops out at 64 crafting operations per call,
+-- and a single grid slot can't hold more than maxCyclesForGrid() cycles'
+-- worth of its heaviest ingredient either - so a request for more than
+-- that safe per-batch cap physically can't be done in one runCraft() call,
+-- no matter what. This runs as many batches as it takes (each within the
+-- safe cap) to fulfill the full number of cycles requested, stopping
+-- early - and reporting exactly how far it actually got - if a batch
+-- fails partway (e.g. ingredients run out before the full request is
+-- done). Re-plans fresh for each batch since consuming stock in one batch
+-- affects what's available for the next.
+local function runCraftBatched(recipe, totalCycles, keepInStorage)
+  local batchCap = math.max(1, math.min(64, maxCyclesForGrid(recipe.grid)))
+  local remaining, done = totalCycles, 0
+  while remaining > 0 do
+    local batch = math.min(batchCap, remaining)
+    local positions = planCraft(recipe, batch)
+    local ok, err = runCraft(recipe, batch, positions, keepInStorage)
+    if not ok then
+      return false, done, totalCycles, err
+    end
+    done = done + batch
+    remaining = remaining - batch
+  end
+  return true, done, totalCycles, nil
+end
+
 -- One level of auto-resolution only: for each short ingredient, checks
 -- whether it has its own craftable recipe AND that recipe's ingredients are
 -- fully in stock right now. If the sub-recipe is itself short, it's left
@@ -666,16 +692,36 @@ end
 -- what was actually asked for), then re-plans against the now-updated
 -- stock and runs the craft the player actually asked for, delivering to
 -- storage or OUTPUT per `keepInStorage` same as a direct runCraft call.
+-- Both the sub-crafts and the final craft run through runCraftBatched, so
+-- a sub-craft needing a large amount (or the main craft itself) isn't
+-- limited to one turtle.craft() call's 64-cycle cap either.
 local function craftResolvingShort(recipe, cycles, summary, keepInStorage)
   for _, t in ipairs(summary) do
     if t.sub then
-      local ok, err = runCraft(t.sub.recipe, t.sub.cycles, t.sub.positions, true)
-      if not ok then return false, "couldn't craft " .. labelFor(t.name) .. ": " .. tostring(err) end
+      local ok, done, total, err = runCraftBatched(t.sub.recipe, t.sub.cycles, true)
+      if not ok then
+        return false, 0, cycles,
+          ("couldn't craft %s (got %d/%d): %s"):format(labelFor(t.name), done, total, tostring(err))
+      end
     end
   end
   local positions, _, short = planCraft(recipe, cycles)
-  if short then return false, "still missing ingredients after auto-crafting" end
-  return runCraft(recipe, cycles, positions, keepInStorage)
+  if short then return false, 0, cycles, "still missing ingredients after auto-crafting" end
+  return runCraftBatched(recipe, cycles, keepInStorage)
+end
+
+-- Formats a craft result covering all three outcomes: fully done, partially
+-- done (some batches succeeded before one failed - e.g. ran out of an
+-- ingredient partway through a big multi-batch request), or nothing done.
+local function craftStatusMsg(success, done, total, recipe, destLabel, err)
+  if success then
+    return ("Crafted %d x %s (%s)"):format(done * recipe.yield, recipe.displayName, destLabel)
+  elseif done > 0 then
+    return ("Crafted %d of %d x %s (%s), then failed: %s")
+      :format(done * recipe.yield, total * recipe.yield, recipe.displayName, destLabel, tostring(err or "unknown error"))
+  else
+    return "Craft failed: " .. tostring(err or "unknown error")
+  end
 end
 
 ---------------------------------------------------------------------------
@@ -994,7 +1040,7 @@ local function handleRemote(sender, msg)
     local grid, gerr = resolveRecipeGrid(recipe)
     if not grid then rednet.send(sender, { ok = false, err = gerr }, REMOTE_PROTO); return end
     local n = math.max(1, tonumber(msg.amount) or recipe.yield)
-    local cycles = math.max(1, math.min(64, maxCyclesForGrid(grid), math.ceil(n / recipe.yield)))
+    local cycles = math.max(1, math.ceil(n / recipe.yield))
     local _, summary, short = planCraft(recipe, cycles)
     if short then findSubCrafts(summary) end
     local out, hasSub = {}, false
@@ -1014,21 +1060,22 @@ local function handleRemote(sender, msg)
     local grid, gerr = resolveRecipeGrid(recipe)
     if not grid then rednet.send(sender, { ok = false, err = gerr }, REMOTE_PROTO); return end
     local n = math.max(1, tonumber(msg.amount) or recipe.yield)
-    local cycles = math.max(1, math.min(64, maxCyclesForGrid(grid), math.ceil(n / recipe.yield)))
-    local positions, summary, short = planCraft(recipe, cycles)
+    local cycles = math.max(1, math.ceil(n / recipe.yield))
+    local _, summary, short = planCraft(recipe, cycles)
     -- Default is banked to storage - deliverToOutput is an explicit opt-in,
     -- same as the local UI's Enter (store) vs O (output) keys.
     local keepInStorage = not msg.deliverToOutput
-    local success, err
+    local success, done, total, err
     if short and msg.auto then
       findSubCrafts(summary)
-      success, err = craftResolvingShort(recipe, cycles, summary, keepInStorage)
+      success, done, total, err = craftResolvingShort(recipe, cycles, summary, keepInStorage)
     elseif short then
       rednet.send(sender, { ok = false, err = "missing ingredients" }, REMOTE_PROTO); return
     else
-      success, err = runCraft(recipe, cycles, positions, keepInStorage)
+      success, done, total, err = runCraftBatched(recipe, cycles, keepInStorage)
     end
-    rednet.send(sender, { ok = success, err = err, produced = cycles * recipe.yield }, REMOTE_PROTO)
+    rednet.send(sender, { ok = success, err = err, produced = done * recipe.yield,
+      requested = total * recipe.yield }, REMOTE_PROTO)
   end
 end
 
@@ -1141,8 +1188,8 @@ while true do
         elseif code == keys.c then cMode = "list"; drawTerminal()
         elseif code == keys.enter then
           local n = math.max(1, tonumber(cAmount) or cSelected.yield)
-          cCycles = math.max(1, math.min(64, maxCyclesForGrid(cSelected.grid), math.ceil(n / cSelected.yield)))
-          cPlan, cSummary, cShort = planCraft(cSelected, cCycles)
+          cCycles = math.max(1, math.ceil(n / cSelected.yield))
+          _, cSummary, cShort = planCraft(cSelected, cCycles)
           if cShort then findSubCrafts(cSummary) end
           cHasSub = false
           for _, t in ipairs(cSummary) do if t.sub then cHasSub = true end end
@@ -1152,35 +1199,27 @@ while true do
       elseif cMode == "confirm" then
         if code == keys.c then cMode = "list"; drawTerminal()
         elseif code == keys.enter and not cShort then
-          local success, err = runCraft(cSelected, cCycles, cPlan, true)
-          cStatusMsg = success
-            and ("Crafted %d x %s (stored)"):format(cCycles * cSelected.yield, cSelected.displayName)
-            or ("Craft failed: " .. tostring(err or "unknown error"))
+          local success, done, total, err = runCraftBatched(cSelected, cCycles, true)
+          cStatusMsg = craftStatusMsg(success, done, total, cSelected, "stored", err)
           cMode = "status"
           drawTerminal()
         elseif code == keys.o and not cShort then
-          local success, err = runCraft(cSelected, cCycles, cPlan, false)
-          cStatusMsg = success
-            and ("Crafted %d x %s (sent to output)"):format(cCycles * cSelected.yield, cSelected.displayName)
-            or ("Craft failed: " .. tostring(err or "unknown error"))
+          local success, done, total, err = runCraftBatched(cSelected, cCycles, false)
+          cStatusMsg = craftStatusMsg(success, done, total, cSelected, "sent to output", err)
           cMode = "status"
           drawTerminal()
         elseif code == keys.s and cShort and cHasSub then
           cStatusMsg = "Crafting missing ingredients..."
           drawTerminal()
-          local success, err = craftResolvingShort(cSelected, cCycles, cSummary, true)
-          cStatusMsg = success
-            and ("Crafted %d x %s (stored)"):format(cCycles * cSelected.yield, cSelected.displayName)
-            or ("Craft failed: " .. tostring(err or "unknown error"))
+          local success, done, total, err = craftResolvingShort(cSelected, cCycles, cSummary, true)
+          cStatusMsg = craftStatusMsg(success, done, total, cSelected, "stored", err)
           cMode = "status"
           drawTerminal()
         elseif code == keys.o and cShort and cHasSub then
           cStatusMsg = "Crafting missing ingredients..."
           drawTerminal()
-          local success, err = craftResolvingShort(cSelected, cCycles, cSummary, false)
-          cStatusMsg = success
-            and ("Crafted %d x %s (sent to output)"):format(cCycles * cSelected.yield, cSelected.displayName)
-            or ("Craft failed: " .. tostring(err or "unknown error"))
+          local success, done, total, err = craftResolvingShort(cSelected, cCycles, cSummary, false)
+          cStatusMsg = craftStatusMsg(success, done, total, cSelected, "sent to output", err)
           cMode = "status"
           drawTerminal()
         end
