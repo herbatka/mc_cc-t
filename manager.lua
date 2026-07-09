@@ -96,17 +96,39 @@ local function notifyMain(msg)
   if mainId then rednet.send(mainId, msg, MANAGER_PROTO) end
 end
 
--- Optional: an attached monitor mirrors everything this computer prints, as
--- a live activity log - purely a "what's it doing right now" window, no
--- input/interaction. Entirely optional; falls back to just this computer's
--- own terminal if none is found.
+-- Optional: an attached monitor gets the full granular activity log (every
+-- import, every move/eviction, every probe result) - this computer's own
+-- terminal deliberately does NOT get this detail, it only shows coarse
+-- batch-level summaries (see logDetail vs. the plain print() calls below).
+-- Entirely optional; nothing needs a monitor to work.
 local monitor = peripheral.find("monitor")
+local monitorName = monitor and peripheral.getName(monitor)
+local buttonBounds = nil   -- {x1, x2, y} of the on-screen "SORT NOW" button
+
+-- The button lives pinned to row 1. Scrolling the monitor (see logDetail)
+-- shifts the WHOLE screen including row 1, so this has to be re-drawn after
+-- every scroll, not just once at startup, or the button would scroll away
+-- after the first screenful of log lines.
+local function drawSortButton()
+  if not monitor then return end
+  local w = monitor.getSize()
+  local label = " SORT NOW "
+  monitor.setCursorPos(1, 1)
+  monitor.setBackgroundColor(colors.gray)
+  monitor.setTextColor(colors.white)
+  monitor.write(label)
+  monitor.setBackgroundColor(colors.black)
+  monitor.setTextColor(colors.white)
+  buttonBounds = { x1 = 1, x2 = math.min(w, #label), y = 1 }
+end
+
 if monitor then
   monitor.setTextScale(0.5)
   monitor.setBackgroundColor(colors.black)
   monitor.setTextColor(colors.white)
   monitor.clear()
-  monitor.setCursorPos(1, 1)
+  drawSortButton()
+  monitor.setCursorPos(1, 1)   -- log lines start filling from row 2 onward
 end
 
 -- Keeps LOG_FILE from growing without bound (and eventually running the
@@ -127,22 +149,28 @@ local function trimLogFileIfNeeded()
   end
 end
 
--- Prints to this computer's own terminal as always, mirrors the same line
--- onto the monitor (if attached), scrolling like a terminal does, and
--- appends it to LOG_FILE so the whole session's activity can be pulled off
--- the computer later (e.g. `pastebin put manager.log` run directly on this
--- computer gets a shareable link, no copy-pasting needed). Timestamped
--- with in-game time of day so it's obvious how recent an entry is during a
--- long-running session.
+-- Granular, per-action detail (every import transfer, every move/eviction
+-- with exact source/destination chest and slot, every probe result) - goes
+-- ONLY to the monitor (if attached) and LOG_FILE, never to this computer's
+-- own terminal, which stays limited to coarse batch-level summaries printed
+-- directly with plain print() at the call sites below. Appends to LOG_FILE
+-- so the whole session's activity can be pulled off the computer later
+-- (e.g. `pastebin put manager.log` run directly on this computer gets a
+-- shareable link, no copy-pasting needed). Timestamped with in-game time of
+-- day so it's obvious how recent an entry is during a long-running session.
 local logLineCount = 0
-local function log(msg)
+local function logDetail(msg)
   local line = ("[%s] %s"):format(textutils.formatTime(os.time(), true), msg)
-  print(line)
   if monitor then
     local w, h = monitor.getSize()
     local _, y = monitor.getCursorPos()
-    if y >= h then monitor.scroll(1); monitor.setCursorPos(1, h)
-    else monitor.setCursorPos(1, y + 1) end
+    if y >= h then
+      monitor.scroll(1)
+      drawSortButton()   -- scrolling wiped row 1 (the button) - redraw it
+      monitor.setCursorPos(1, h)
+    else
+      monitor.setCursorPos(1, y + 1)
+    end
     monitor.write(line:sub(1, w))
   end
   local f = io.open(LOG_FILE, "a")
@@ -181,12 +209,12 @@ local function importFromInput()
     for _, name in ipairs(storages) do
       if remaining <= 0 then break end
       local m = safePush(INPUT, slot, name, remaining)
-      if m > 0 then log(("Import: %dx %s -> %s"):format(m, label, name)) end
+      if m > 0 then logDetail(("Import: %dx %s -> %s"):format(m, label, name)) end
       remaining = remaining - m
       moved = moved + m
     end
     if remaining > 0 then
-      log(("Import: %dx %s left in %s - no chest had room"):format(remaining, label, INPUT))
+      logDetail(("Import: %dx %s left in %s - no chest had room"):format(remaining, label, INPUT))
     end
   end
   return moved
@@ -338,7 +366,7 @@ local function rebalance()
 
   local itemCount = 0
   for _ in pairs(byKey) do itemCount = itemCount + 1 end
-  log(("Rebalance: %d distinct item(s) across %d chest(s), rank order: %s")
+  logDetail(("Rebalance: %d distinct item(s) across %d chest(s), rank order: %s")
     :format(itemCount, #storages, table.concat((function()
       local names = {}
       for _, k in ipairs(rankOrder) do names[#names + 1] = prettify(keyItemName(k)) end
@@ -391,7 +419,7 @@ local function rebalance()
                       end
                     end
                   end
-                  log(("Evict: %dx %s  %s:%d -> %s:%d (clearing space for %s)")
+                  logDetail(("Evict: %dx %s  %s:%d -> %s:%d (clearing space for %s)")
                     :format(m, prettify(keyItemName(blocker)), t.inv, t.slot, scratch.inv, scratch.slot, itemLabel))
                   dest = t
                 else
@@ -417,7 +445,7 @@ local function rebalance()
             local destId = slotId(dest)
             occupant[destId] = key
             slotCount[destId] = (slotCount[destId] or 0) + m
-            log(("Move: %dx %s  %s:%d -> %s:%d"):format(m, itemLabel, loc.inv, loc.slot, dest.inv, dest.slot))
+            logDetail(("Move: %dx %s  %s:%d -> %s:%d"):format(m, itemLabel, loc.inv, loc.slot, dest.inv, dest.slot))
             if m >= loc.count then
               occupant[slotId(loc)] = nil
               slotCount[slotId(loc)] = nil
@@ -425,16 +453,16 @@ local function rebalance()
             else
               slotCount[slotId(loc)] = loc.count - m
               unmovable = unmovable + 1
-              log(("Stuck (partial): %s at %s:%d - only %d of %d moved, rest waits for next run")
+              logDetail(("Stuck (partial): %s at %s:%d - only %d of %d moved, rest waits for next run")
                 :format(itemLabel, loc.inv, loc.slot, m, loc.count))
             end
           else
             unmovable = unmovable + 1
-            log(("Stuck (push failed): %s at %s:%d -> %s:%d didn't take"):format(itemLabel, loc.inv, loc.slot, dest.inv, dest.slot))
+            logDetail(("Stuck (push failed): %s at %s:%d -> %s:%d didn't take"):format(itemLabel, loc.inv, loc.slot, dest.inv, dest.slot))
           end
         else
           unmovable = unmovable + 1
-          log(("Stuck (no room): %s at %s:%d - target slots all occupied, no free slot anywhere to evict into")
+          logDetail(("Stuck (no room): %s at %s:%d - target slots all occupied, no free slot anywhere to evict into")
             :format(itemLabel, loc.inv, loc.slot))
         end
       end
@@ -461,7 +489,7 @@ local function probeCapacities()
   if not bestKey then return 0 end   -- nothing in storage yet
 
   local itemLabel = prettify(keyItemName(bestKey))
-  log(("Probe: using %s (%d total) to test capacity of %d chest(s)"):format(itemLabel, bestTotal, #storages))
+  logDetail(("Probe: using %s (%d total) to test capacity of %d chest(s)"):format(itemLabel, bestTotal, #storages))
 
   local probed = 0
   for _, name in ipairs(storages) do
@@ -492,13 +520,13 @@ local function probeCapacities()
         local prevCap = chestCapacity[name] or DEFAULT_STACK_CAP
         if observed > prevCap then
           chestCapacity[name] = observed
-          log(("Probe: %s:%d holds %d %s - capacity raised from %d to %d"):format(name, targetSlot, observed, itemLabel, prevCap, observed))
+          logDetail(("Probe: %s:%d holds %d %s - capacity raised from %d to %d"):format(name, targetSlot, observed, itemLabel, prevCap, observed))
         else
-          log(("Probe: %s:%d holds %d %s - capacity still %d (not enough %s to test further)"):format(name, targetSlot, observed, itemLabel, prevCap, itemLabel))
+          logDetail(("Probe: %s:%d holds %d %s - capacity still %d (not enough %s to test further)"):format(name, targetSlot, observed, itemLabel, prevCap, itemLabel))
         end
         probed = probed + 1
       else
-        log(("Probe: %s has no slot free or already holding %s - skipped"):format(name, itemLabel))
+        logDetail(("Probe: %s has no slot free or already holding %s - skipped"):format(name, itemLabel))
       end
     end
   end
@@ -513,26 +541,59 @@ end
 local function probeThenRebalance()
   local ok, probed = pcall(probeCapacities)
   if not ok then
-    log("capacity probe error: " .. tostring(probed))
+    print("capacity probe error: " .. tostring(probed))
     return
   end
   if probed > 0 then
-    log(("Probe complete: measured %d chest(s)"):format(probed))
+    print(("Probe complete: measured %d chest(s)"):format(probed))
   end
   local rok, moved, unmovable = pcall(rebalance)
   if rok then
     if moved > 0 then
-      log(("Rebalance complete: moved %d item(s), %d stack(s) still waiting on room"):format(moved, unmovable))
+      print(("Rebalance complete: moved %d item(s), %d stack(s) still waiting on room"):format(moved, unmovable))
     end
   else
-    log("rebalance error: " .. tostring(moved))
+    print("rebalance error: " .. tostring(moved))
   end
   if probed > 0 or (rok and moved > 0) then notifyMain({ cmd = "storageChanged" }) end
 end
 
+-- Manually-triggered convergence loop for the monitor's "SORT NOW" button:
+-- keeps calling rebalance() back to back (each pass builds on where the
+-- last one left off) until a pass moves nothing, rather than waiting for
+-- REBALANCE_INTERVAL to tick several times on its own. A safety cap keeps
+-- a storage network that's genuinely too full to ever fully settle (see
+-- rebalance's own "no free slot anywhere" case) from looping forever.
+local SORT_MAX_PASSES = 50
+
+local function sortUntilDone()
+  print("Sort: running until storage is fully settled (SORT NOW pressed)...")
+  local totalMoved = 0
+  for pass = 1, SORT_MAX_PASSES do
+    refreshStorages()
+    local ok, moved, unmovable = pcall(rebalance)
+    if not ok then
+      print("Sort: rebalance error: " .. tostring(moved))
+      return
+    end
+    totalMoved = totalMoved + moved
+    if moved > 0 then notifyMain({ cmd = "storageChanged" }) end
+    print(("Sort: pass %d - moved %d item(s), %d stack(s) still waiting on room"):format(pass, moved, unmovable))
+    if moved == 0 then
+      if unmovable > 0 then
+        print(("Sort: stopped after %d pass(es) - %d stack(s) stuck with no free space anywhere to evict into (storage is essentially full)"):format(pass, unmovable))
+      else
+        print(("Sort: fully settled after %d pass(es), %d item(s) moved total"):format(pass, totalMoved))
+      end
+      return
+    end
+  end
+  print(("Sort: stopped after hitting the %d-pass safety cap, %d item(s) moved total (still making progress - press SORT NOW again to continue)"):format(SORT_MAX_PASSES, totalMoved))
+end
+
 term.clear(); term.setCursorPos(1, 1)
-log("Storage manager running.")
-log(("Watching %d chest(s), importing from %s"):format(#storages, INPUT))
+print("Storage manager running.")
+print(("Watching %d chest(s), importing from %s"):format(#storages, INPUT))
 
 probeThenRebalance()   -- measure real chest capacities right away at startup
 
@@ -550,7 +611,7 @@ while true do
       if ok and result > 0 then
         notifyMain({ cmd = "storageChanged" })
       elseif not ok then
-        log("import error: " .. tostring(result))
+        print("import error: " .. tostring(result))
       end
       importTimer = os.startTimer(IMPORT_INTERVAL)
 
@@ -559,11 +620,11 @@ while true do
       local ok, moved, unmovable = pcall(rebalance)
       if ok then
         if moved > 0 then
-          log(("Rebalance complete: moved %d item(s), %d stack(s) still waiting on room"):format(moved, unmovable))
+          print(("Rebalance complete: moved %d item(s), %d stack(s) still waiting on room"):format(moved, unmovable))
           notifyMain({ cmd = "storageChanged" })
         end
       else
-        log("rebalance error: " .. tostring(moved))
+        print("rebalance error: " .. tostring(moved))
       end
       rebalanceTimer = os.startTimer(REBALANCE_INTERVAL)
 
@@ -575,6 +636,12 @@ while true do
     elseif ev[2] == heartbeatTimer then
       notifyMain({ cmd = "heartbeat" })
       heartbeatTimer = os.startTimer(HEARTBEAT_INTERVAL)
+    end
+
+  elseif ev[1] == "monitor_touch" and monitorName and ev[2] == monitorName then
+    local x, y = ev[3], ev[4]
+    if buttonBounds and y == buttonBounds.y and x >= buttonBounds.x1 and x <= buttonBounds.x2 then
+      sortUntilDone()
     end
   end
 end
