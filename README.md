@@ -129,6 +129,19 @@ computer, not anything special.
    **`startup.lua`**, then reboot so it runs automatically.
 3. Reboot the main computer too, so it picks up rednet hosting for the new
    `cg_manager` protocol this computer listens on.
+4. Optionally, attach a monitor to the same network - the manager mirrors
+   everything it logs onto it live (scrolling like a terminal), so you can
+   watch exactly what it's doing: every individual item import, every
+   stack move/eviction during a rebalance (with the exact source/destination
+   chest and slot), and every capacity probe result. No monitor needed for
+   any of this to work - it's purely an optional window into what's
+   happening, same log either way.
+
+Everything logged also gets appended to `manager.log` on the manager
+computer's own disk (trimmed back once it gets big, so it can't fill up
+the computer's storage) - run `pastebin put manager.log` directly on that
+computer's terminal any time to get a shareable link for troubleshooting,
+no copy-pasting needed.
 
 From then on, `manager.lua`:
 - **Imports INPUT** every couple seconds, same as the main computer used to

@@ -44,6 +44,10 @@ local DEFAULT_STACK_CAP = 64
 -- naturally seesaw during normal play.
 local RANK_SWAP_THRESHOLD = 64
 local MANAGER_PROTO, MAIN_HOST = "cg_manager", "mainstore"
+local LOG_FILE = "manager.log"
+local LOG_MAX_BYTES = 200000   -- trimmed back to the last half once exceeded,
+                                -- so this never eats into the computer's
+                                -- overall disk quota (computer_space_limit)
 ----------------------------------------------------------------------------
 
 if not peripheral.isPresent(INPUT) then error("INPUT '"..INPUT.."' not found", 0) end
@@ -81,10 +85,70 @@ if not opened then error("No modem attached. Attach a Wired or Wireless Modem.",
 local mainId = nil   -- resolved lazily; startup.lua might not be booted yet
 
 local function keyOf(item) return item.name .. "|" .. (item.nbt or "") end
+local function keyItemName(key) return key:match("^([^|]*)") or key end
+local function prettify(name)
+  local short = name:gsub("^.-:", ""):gsub("_", " ")
+  return (short:gsub("(%a)([%w']*)", function(f, r) return f:upper() .. r end))
+end
 
 local function notifyMain(msg)
   if not mainId then mainId = rednet.lookup(MANAGER_PROTO, MAIN_HOST) end
   if mainId then rednet.send(mainId, msg, MANAGER_PROTO) end
+end
+
+-- Optional: an attached monitor mirrors everything this computer prints, as
+-- a live activity log - purely a "what's it doing right now" window, no
+-- input/interaction. Entirely optional; falls back to just this computer's
+-- own terminal if none is found.
+local monitor = peripheral.find("monitor")
+if monitor then
+  monitor.setTextScale(0.5)
+  monitor.setBackgroundColor(colors.black)
+  monitor.setTextColor(colors.white)
+  monitor.clear()
+  monitor.setCursorPos(1, 1)
+end
+
+-- Keeps LOG_FILE from growing without bound (and eventually running the
+-- computer out of disk space) by dropping the older half once it crosses
+-- LOG_MAX_BYTES, rather than deleting/rotating it outright - so there's
+-- always recent history in it, just not literally everything ever logged.
+local function trimLogFileIfNeeded()
+  if not (fs.exists(LOG_FILE) and fs.getSize(LOG_FILE) > LOG_MAX_BYTES) then return end
+  local f = io.open(LOG_FILE, "r")
+  if not f then return end
+  local lines = {}
+  for l in f:lines() do lines[#lines + 1] = l end
+  f:close()
+  local out = io.open(LOG_FILE, "w")
+  if out then
+    for i = math.floor(#lines / 2) + 1, #lines do out:write(lines[i], "\n") end
+    out:close()
+  end
+end
+
+-- Prints to this computer's own terminal as always, mirrors the same line
+-- onto the monitor (if attached), scrolling like a terminal does, and
+-- appends it to LOG_FILE so the whole session's activity can be pulled off
+-- the computer later (e.g. `pastebin put manager.log` run directly on this
+-- computer gets a shareable link, no copy-pasting needed). Timestamped
+-- with in-game time of day so it's obvious how recent an entry is during a
+-- long-running session.
+local logLineCount = 0
+local function log(msg)
+  local line = ("[%s] %s"):format(textutils.formatTime(os.time(), true), msg)
+  print(line)
+  if monitor then
+    local w, h = monitor.getSize()
+    local _, y = monitor.getCursorPos()
+    if y >= h then monitor.scroll(1); monitor.setCursorPos(1, h)
+    else monitor.setCursorPos(1, y + 1) end
+    monitor.write(line:sub(1, w))
+  end
+  local f = io.open(LOG_FILE, "a")
+  if f then f:write(line, "\n"); f:close() end
+  logLineCount = logLineCount + 1
+  if logLineCount % 50 == 0 then trimLogFileIfNeeded() end
 end
 
 -- pushItems() throws a hard error if its target has vanished since it was
@@ -113,11 +177,16 @@ local function importFromInput()
   local moved = 0
   for slot, item in pairs(contents) do
     local remaining = item.count
+    local label = prettify(item.name)
     for _, name in ipairs(storages) do
       if remaining <= 0 then break end
       local m = safePush(INPUT, slot, name, remaining)
+      if m > 0 then log(("Import: %dx %s -> %s"):format(m, label, name)) end
       remaining = remaining - m
       moved = moved + m
+    end
+    if remaining > 0 then
+      log(("Import: %dx %s left in %s - no chest had room"):format(remaining, label, INPUT))
     end
   end
   return moved
@@ -267,11 +336,21 @@ local function rebalance()
     if not occupant[slotId(loc)] then freeSlots[#freeSlots + 1] = loc end
   end
 
+  local itemCount = 0
+  for _ in pairs(byKey) do itemCount = itemCount + 1 end
+  log(("Rebalance: %d distinct item(s) across %d chest(s), rank order: %s")
+    :format(itemCount, #storages, table.concat((function()
+      local names = {}
+      for _, k in ipairs(rankOrder) do names[#names + 1] = prettify(keyItemName(k)) end
+      return names
+    end)(), " > ")))
+
   local moved, unmovable = 0, 0
   for _, key in ipairs(rankOrder) do
     local range = targets[key] or {}
     local inRange = {}
     for _, loc in ipairs(range) do inRange[slotId(loc)] = true end
+    local itemLabel = prettify(keyItemName(key))
 
     for _, loc in ipairs(byKey[key].locations) do
       if not inRange[slotId(loc)] then
@@ -312,6 +391,8 @@ local function rebalance()
                       end
                     end
                   end
+                  log(("Evict: %dx %s  %s:%d -> %s:%d (clearing space for %s)")
+                    :format(m, prettify(keyItemName(blocker)), t.inv, t.slot, scratch.inv, scratch.slot, itemLabel))
                   dest = t
                 else
                   -- partial/failed push (blocker's chest may have vanished,
@@ -336,6 +417,7 @@ local function rebalance()
             local destId = slotId(dest)
             occupant[destId] = key
             slotCount[destId] = (slotCount[destId] or 0) + m
+            log(("Move: %dx %s  %s:%d -> %s:%d"):format(m, itemLabel, loc.inv, loc.slot, dest.inv, dest.slot))
             if m >= loc.count then
               occupant[slotId(loc)] = nil
               slotCount[slotId(loc)] = nil
@@ -343,12 +425,17 @@ local function rebalance()
             else
               slotCount[slotId(loc)] = loc.count - m
               unmovable = unmovable + 1
+              log(("Stuck (partial): %s at %s:%d - only %d of %d moved, rest waits for next run")
+                :format(itemLabel, loc.inv, loc.slot, m, loc.count))
             end
           else
             unmovable = unmovable + 1
+            log(("Stuck (push failed): %s at %s:%d -> %s:%d didn't take"):format(itemLabel, loc.inv, loc.slot, dest.inv, dest.slot))
           end
         else
           unmovable = unmovable + 1
+          log(("Stuck (no room): %s at %s:%d - target slots all occupied, no free slot anywhere to evict into")
+            :format(itemLabel, loc.inv, loc.slot))
         end
       end
     end
@@ -372,6 +459,9 @@ local function probeCapacities()
     if not bestTotal or info.total > bestTotal then bestKey, bestTotal = key, info.total end
   end
   if not bestKey then return 0 end   -- nothing in storage yet
+
+  local itemLabel = prettify(keyItemName(bestKey))
+  log(("Probe: using %s (%d total) to test capacity of %d chest(s)"):format(itemLabel, bestTotal, #storages))
 
   local probed = 0
   for _, name in ipairs(storages) do
@@ -399,10 +489,16 @@ local function probeCapacities()
         end
         local landed = inv.list()[targetSlot]
         local observed = landed and landed.count or 0
-        if observed > (chestCapacity[name] or DEFAULT_STACK_CAP) then
+        local prevCap = chestCapacity[name] or DEFAULT_STACK_CAP
+        if observed > prevCap then
           chestCapacity[name] = observed
+          log(("Probe: %s:%d holds %d %s - capacity raised from %d to %d"):format(name, targetSlot, observed, itemLabel, prevCap, observed))
+        else
+          log(("Probe: %s:%d holds %d %s - capacity still %d (not enough %s to test further)"):format(name, targetSlot, observed, itemLabel, prevCap, itemLabel))
         end
         probed = probed + 1
+      else
+        log(("Probe: %s has no slot free or already holding %s - skipped"):format(name, itemLabel))
       end
     end
   end
@@ -417,26 +513,26 @@ end
 local function probeThenRebalance()
   local ok, probed = pcall(probeCapacities)
   if not ok then
-    print("capacity probe error: " .. tostring(probed))
+    log("capacity probe error: " .. tostring(probed))
     return
   end
   if probed > 0 then
-    print(("probed capacity of %d chest(s)"):format(probed))
+    log(("Probe complete: measured %d chest(s)"):format(probed))
   end
   local rok, moved, unmovable = pcall(rebalance)
   if rok then
     if moved > 0 then
-      print(("rebalanced: moved %d item(s), %d stack(s) still waiting on room"):format(moved, unmovable))
+      log(("Rebalance complete: moved %d item(s), %d stack(s) still waiting on room"):format(moved, unmovable))
     end
   else
-    print("rebalance error: " .. tostring(moved))
+    log("rebalance error: " .. tostring(moved))
   end
   if probed > 0 or (rok and moved > 0) then notifyMain({ cmd = "storageChanged" }) end
 end
 
 term.clear(); term.setCursorPos(1, 1)
-print("Storage manager running.")
-print(("Watching %d chest(s), importing from %s"):format(#storages, INPUT))
+log("Storage manager running.")
+log(("Watching %d chest(s), importing from %s"):format(#storages, INPUT))
 
 probeThenRebalance()   -- measure real chest capacities right away at startup
 
@@ -452,10 +548,9 @@ while true do
       refreshStorages()
       local ok, result = pcall(importFromInput)
       if ok and result > 0 then
-        print(("imported %d item(s)"):format(result))
         notifyMain({ cmd = "storageChanged" })
       elseif not ok then
-        print("import error: " .. tostring(result))
+        log("import error: " .. tostring(result))
       end
       importTimer = os.startTimer(IMPORT_INTERVAL)
 
@@ -464,11 +559,11 @@ while true do
       local ok, moved, unmovable = pcall(rebalance)
       if ok then
         if moved > 0 then
-          print(("rebalanced: moved %d item(s), %d stack(s) still waiting on room"):format(moved, unmovable))
+          log(("Rebalance complete: moved %d item(s), %d stack(s) still waiting on room"):format(moved, unmovable))
           notifyMain({ cmd = "storageChanged" })
         end
       else
-        print("rebalance error: " .. tostring(moved))
+        log("rebalance error: " .. tostring(moved))
       end
       rebalanceTimer = os.startTimer(REBALANCE_INTERVAL)
 
