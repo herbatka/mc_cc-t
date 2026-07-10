@@ -118,8 +118,30 @@ it sees first on the network - fine with only one monitor around, but once
 the storage manager computer below has its own monitor too, on the same
 wired network, the main computer could end up displaying on THAT one
 instead of its own. If that happens, set `MONITOR_NAME` in `startup.lua` to
-this computer's own monitor's exact peripheral name (the `peripheral.
-getNames()` trick again) and reboot.
+this computer's own monitor's exact peripheral name and reboot - if it's
+wrong or not found, the computer now errors out and tells you so instead of
+silently falling back to auto-find (which would just land on the wrong
+monitor again with no explanation).
+
+Finding the right name takes a bit of care:
+- A side name like `"left"`/`"right"`/`"top"`/`"bottom"`/`"front"`/`"back"`
+  only works for a monitor placed directly against this computer with **no
+  wired modem** in between - if there's a modem anywhere between the
+  computer and the monitor (including one on the monitor itself), it's on
+  the wired network instead and needs its network name (like `"monitor_0"`),
+  not a side name.
+- A multi-block Advanced Monitor (the kind you build by placing several
+  monitor blocks together) only responds as a peripheral from its single
+  **origin** block - usually the top-left block of the whole structure, not
+  wherever happens to visually sit "to the left" of the computer. Placing
+  a monitor that's mostly-left-but-partly-above (or any irregular shape)
+  can easily put the actual origin block somewhere other than where you'd
+  guess.
+- The reliable way to find the exact name either way: run
+  `peripheral.getNames()` on this computer and check each result with
+  `peripheral.getType(name)` - whichever one reports `"monitor"` and, when
+  you `peripheral.wrap()` it and call `.clear()`, visibly clears the
+  monitor you're trying to target, is the right name.
 
 ### Setting up the storage manager
 

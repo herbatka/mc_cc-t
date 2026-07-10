@@ -62,9 +62,15 @@ local API_BASE = "http://127.0.0.1:3001"
 local MONITOR_NAME = "left"
 ----------------------------------------------------------------------------
 
-local monitor = MONITOR_NAME and peripheral.wrap(MONITOR_NAME) or peripheral.find("monitor")
-if not monitor then
-  error("No monitor found" .. (MONITOR_NAME and (" named '" .. MONITOR_NAME .. "'") or "") .. ". Attach an Advanced Monitor.", 0)
+local monitor
+if MONITOR_NAME then
+  monitor = peripheral.wrap(MONITOR_NAME)
+  if not monitor then
+    error(("No monitor found named '%s' - check the exact name with peripheral.getNames() (side names like \"left\"/\"right\" only work for a monitor placed directly against this computer with no wired modem in between, and a multi-block Advanced Monitor only responds as a peripheral from its single origin block, not just anywhere the monitor visually covers)."):format(MONITOR_NAME), 0)
+  end
+else
+  monitor = peripheral.find("monitor")
+  if not monitor then error("No monitor found. Attach an Advanced Monitor.", 0) end
 end
 monitor.setTextScale(0.5)
 
