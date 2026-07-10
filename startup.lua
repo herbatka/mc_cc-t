@@ -641,7 +641,20 @@ local function runCraft(recipe, cycles, plan, keepInStorage, onProgress)
     local total = 0
     for _, p in ipairs(entries) do total = total + p.needed end
     if onProgress then onProgress("Moving " .. labelFor(name) .. "...") end
-    pushToBarrel(name, total)
+    local staged = pushToBarrel(name, total)
+    if staged < total then
+      -- Silently pressing on here used to mean whichever grid slot got
+      -- served last (of possibly several sharing this same ingredient,
+      -- e.g. a tag-based ingredient occupying multiple grid positions)
+      -- came up short with a confusing "slot maxed out or barrel short"
+      -- error, even though the REAL problem was staging never having
+      -- enough to begin with (not enough real stock despite the earlier
+      -- plan check, or the staging barrel itself out of room) - failing
+      -- here instead gives a clear, accurate reason immediately.
+      collectFromTurtle(nil)
+      return false, ("only staged %d of %d %s in the barrel - not enough stock, or the staging barrel has no room")
+        :format(staged, total, labelFor(name))
+    end
     buildIndex(); applyFilter()
     for _, p in ipairs(entries) do
       local ok, err = turtleLoadSlot(GRID_SLOTS[p.pos], p.needed)
