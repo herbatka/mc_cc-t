@@ -43,6 +43,14 @@ local DEFAULT_STACK_CAP = 64
 -- would swap chest position back and forth on every run as their counts
 -- naturally seesaw during normal play.
 local RANK_SWAP_THRESHOLD = 64
+-- Hard cap on how many misplaced-stack attempts a SINGLE rebalance() call
+-- will make before returning early (see rebalance below) - with a lot of
+-- distinct items, a call that never returns would starve import/heartbeat
+-- forever (they only get a turn once rebalance() actually returns control
+-- to the main loop), effectively freezing the whole manager. Capping this
+-- guarantees a call always returns promptly no matter how much work is
+-- left to do - any leftover work just continues on the next call instead.
+local REBALANCE_OP_BUDGET = 2000
 local MANAGER_PROTO, MAIN_HOST = "cg_manager", "mainstore"
 local LOG_FILE = "manager.log"
 local LOG_MAX_BYTES = 200000   -- trimmed back to the last half once exceeded,
@@ -513,6 +521,7 @@ local function rebalance(ignoreHysteresis)
     end)(), " > ")))
 
   local moved, unmovable = 0, 0
+  local opBudget = REBALANCE_OP_BUDGET
   for _, key in ipairs(rankOrder) do
     local range = targets[key] or {}
     local inRange = {}
@@ -530,6 +539,11 @@ local function rebalance(ignoreHysteresis)
       for _, loc in ipairs(locations) do
         if not inRange[slotId(loc)] then
           maybeYield()
+          opBudget = opBudget - 1
+          if opBudget <= 0 then
+            logDetail("Rebalance: operation budget reached for this call - stopping early, will pick up the rest next run")
+            return moved, unmovable
+          end
           local dest
           for _, t in ipairs(range) do
             local sid = slotId(t)

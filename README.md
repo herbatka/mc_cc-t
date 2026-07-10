@@ -212,6 +212,15 @@ From then on, `manager.lua`:
     occupied, nowhere at all to even temporarily park anything) - freeing
     up some room (or adding another chest) is what unblocks it, same as a
     15-puzzle needs at least one empty space to shuffle at all.
+  - **A single rebalance() run can only do so much work before returning**
+    (`REBALANCE_OP_BUDGET`, 2000 by default) - with a LOT of distinct items,
+    fully settling everything could in principle take a very long time in
+    one unbroken stretch, and since imports/heartbeats only get a turn once
+    a run actually finishes, a run that never returns would silently freeze
+    the whole manager (looks like it's "sorting forever" while INPUT quietly
+    stops being touched at all). Hitting the budget just means the rest
+    picks up on the next run instead - normal and expected on a big,
+    heavily-scattered network, not a sign of a stuck computer.
   - Rankings have a deadzone (`RANK_SWAP_THRESHOLD`, 64 by default): an item
     only overtakes its neighbor once it beats it by more than that many
     items, so two items with close totals don't swap chest position back
