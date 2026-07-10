@@ -264,6 +264,21 @@ local function maybeYield()
   end
 end
 
+-- Most recent per-key target range computed by rebalance() (see below) -
+-- letting fresh imports land directly in an item's own established range
+-- instead of wherever the first chest with any room happens to be, which
+-- used to be a real fight against rebalance(): a chest holding high-rank
+-- items (chest_1) almost always has SOME free/mergeable slot, so ongoing
+-- production of a lower-rank item (e.g. gold nuggets from active mining)
+-- kept landing right back in a higher-rank item's slots (e.g. diamond's)
+-- every single import cycle, faster than rebalance() could evict it back
+-- out - a permanent tug-of-war that made sorting look like it never
+-- finished even after hundreds of passes. Left nil until the first
+-- rebalance() call after startup; falls back to the old "any chest with
+-- room" behavior for anything not covered yet (brand new items) or whose
+-- own range is genuinely full right now.
+local lastTargets = nil
+
 -- Distributes whatever's in INPUT across the storages with room, merging
 -- into existing compatible stacks first (pushItems' own behavior) before
 -- using empty slots. Doesn't bother finding "the" existing stack for an
@@ -277,6 +292,18 @@ local function importFromInput()
   for slot, item in pairs(contents) do
     local remaining = item.count
     local label = prettify(item.name)
+    local range = lastTargets and lastTargets[keyOf(item)]
+    if range then
+      for _, t in ipairs(range) do
+        if remaining <= 0 then break end
+        local m = safePush(INPUT, slot, t.inv, remaining, t.slot)
+        if m > 0 then
+          logDetail(("Import: %dx %s -> %s:%d (its own target range)"):format(m, label, t.inv, t.slot))
+          remaining = remaining - m
+          moved = moved + m
+        end
+      end
+    end
     for _, name in ipairs(storages) do
       if remaining <= 0 then break end
       local m = safePush(INPUT, slot, name, remaining)
@@ -442,6 +469,7 @@ local function rebalance(ignoreHysteresis)
   local slots = allSlotsOrdered()
   updateRankOrder(byKey, ignoreHysteresis)
   local targets = assignTargets(byKey, slots)
+  lastTargets = targets
 
   -- slotId -> item key currently sitting there, and how many - the count
   -- matters here (not just in scanByKey's return) because a "same key

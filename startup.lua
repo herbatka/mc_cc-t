@@ -52,10 +52,20 @@ local TURTLE_STAGING = "minecraft:barrel_3"
 -- from this computer - add it to CC:Tweaked's http.rules allowlist if it's
 -- a loopback/private address (it blocks those by default).
 local API_BASE = "http://127.0.0.1:3001"
+-- peripheral.find("monitor") just grabs whichever monitor it happens to see
+-- FIRST - fine with only one monitor on the whole network, but the storage
+-- manager computer (manager.lua) has its own monitor too, on the SAME wired
+-- network, so this computer could easily end up displaying on THAT one
+-- instead of its own. Set this to this computer's own monitor's exact
+-- peripheral name (check with the `peripheral.getNames()` trick - e.g.
+-- "monitor_0") if that happens; leave nil to keep auto-finding.
+local MONITOR_NAME = nil
 ----------------------------------------------------------------------------
 
-local monitor = peripheral.find("monitor")
-if not monitor then error("No monitor found. Attach an Advanced Monitor.", 0) end
+local monitor = MONITOR_NAME and peripheral.wrap(MONITOR_NAME) or peripheral.find("monitor")
+if not monitor then
+  error("No monitor found" .. (MONITOR_NAME and (" named '" .. MONITOR_NAME .. "'") or "") .. ". Attach an Advanced Monitor.", 0)
+end
 monitor.setTextScale(0.5)
 
 if not peripheral.isPresent(OUTPUT) then error("OUTPUT '"..OUTPUT.."' not found", 0) end

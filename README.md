@@ -113,6 +113,14 @@ reachability are both checked live, per request, instead: if
 not found" error, and if the database is unreachable, search just returns
 nothing with a clear error instead of hanging or crashing.
 
+The main computer's own monitor is found by just grabbing whichever monitor
+it sees first on the network - fine with only one monitor around, but once
+the storage manager computer below has its own monitor too, on the same
+wired network, the main computer could end up displaying on THAT one
+instead of its own. If that happens, set `MONITOR_NAME` in `startup.lua` to
+this computer's own monitor's exact peripheral name (the `peripheral.
+getNames()` trick again) and reboot.
+
 ### Setting up the storage manager
 
 `manager.lua` runs on its **own separate computer** whose only job is
