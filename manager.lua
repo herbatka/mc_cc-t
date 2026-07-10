@@ -242,13 +242,25 @@ end
 -- event round-trip that resolves instantly (nothing else is listening for
 -- "cg_yield"), instead of an os.sleep() that would actually slow things
 -- down waiting on real ticks.
+--
+-- os.pullEvent(filter) DISCARDS any event that doesn't match the filter
+-- while it waits - so filtering for "cg_yield" specifically could silently
+-- eat a real event (an import/rebalance timer tick, a rednet message from
+-- the main computer, someone touching the monitor's button) if it happened
+-- to already be queued at that exact moment. Pulling with no filter and
+-- re-queueing anything that isn't ours guarantees nothing real is ever
+-- lost, just possibly reordered by a fraction of a second.
 local opsSinceYield = 0
 local function maybeYield()
   opsSinceYield = opsSinceYield + 1
   if opsSinceYield >= 200 then
     opsSinceYield = 0
     os.queueEvent("cg_yield")
-    os.pullEvent("cg_yield")
+    while true do
+      local ev = { os.pullEvent() }
+      if ev[1] == "cg_yield" then break end
+      os.queueEvent(table.unpack(ev))
+    end
   end
 end
 
@@ -351,7 +363,14 @@ local rankOrder = {}   -- ordered list of item keys, highest total-count first
 -- rule ignores RANK_SWAP_THRESHOLD entirely whenever the two sides of a
 -- comparison are in different tiers (only applying the hysteresis
 -- threshold within a tier, same as before).
-local function updateRankOrder(byKey)
+--
+-- `ignoreHysteresis` (used by the manual SORT NOW button) drops the
+-- RANK_SWAP_THRESHOLD deadzone entirely within a tier too, so a manually
+-- requested sort always reflects the exact current totals right now
+-- instead of waiting for a decisive lead - periodic automatic rebalancing
+-- still keeps the deadzone so normal play doesn't cause needless swapping.
+local function updateRankOrder(byKey, ignoreHysteresis)
+  local threshold = ignoreHysteresis and 0 or RANK_SWAP_THRESHOLD
   local seen, newOrder = {}, {}
   for _, key in ipairs(rankOrder) do
     if byKey[key] then newOrder[#newOrder + 1] = key; seen[key] = true end
@@ -369,7 +388,7 @@ local function updateRankOrder(byKey)
       if aJunk ~= bJunk then
         shouldSwap = aJunk   -- junk sitting ahead of a plain item always swaps back
       else
-        shouldSwap = byKey[b].total > byKey[a].total + RANK_SWAP_THRESHOLD
+        shouldSwap = byKey[b].total > byKey[a].total + threshold
       end
       if shouldSwap then
         newOrder[i], newOrder[i + 1] = newOrder[i + 1], newOrder[i]
@@ -415,10 +434,13 @@ local function slotId(loc) return loc.inv .. "#" .. loc.slot end
 -- (every target slot still occupied and no free slot anywhere left in the
 -- whole network to evict into) is left for a later run, once whatever's in
 -- the way has had a chance to move on to its own target.
-local function rebalance()
+--
+-- `ignoreHysteresis` (used by the manual SORT NOW button) passes straight
+-- through to updateRankOrder - see there for why.
+local function rebalance(ignoreHysteresis)
   local byKey = scanByKey()
   local slots = allSlotsOrdered()
-  updateRankOrder(byKey)
+  updateRankOrder(byKey, ignoreHysteresis)
   local targets = assignTargets(byKey, slots)
 
   -- slotId -> item key currently sitting there, and how many - the count
@@ -675,10 +697,13 @@ end
 -- INPUT queuing up untouched for however long the sort takes.
 --
 -- Stops on its own once a pass moves nothing (fully settled, or stuck with
--- no free space anywhere left to evict into), touching the button again
--- stops it early, and a safety cap keeps a storage network that's
--- genuinely too full from ever fully settling from looping forever.
-local SORT_MAX_PASSES = 50
+-- no free space anywhere left to evict into) or touching the button again
+-- stops it early - deliberately no pass cap otherwise, so a manual request
+-- to "just sort it" keeps going for however many passes it actually takes
+-- on a big, badly-scattered network instead of quitting partway with more
+-- work still to do. Also ignores the rank-order hysteresis deadzone
+-- entirely (see updateRankOrder's ignoreHysteresis) so a manual sort always
+-- reflects the true current totals instead of waiting out a threshold.
 local sortTimer, sortPass, sortTotalMoved = nil, 0, 0
 
 local function stopSorting(reason)
@@ -707,7 +732,7 @@ end
 local function runSortPass()
   refreshStorages()
   sortPass = sortPass + 1
-  local ok, moved, unmovable = pcall(rebalance)
+  local ok, moved, unmovable = pcall(rebalance, true)
   if not ok then
     stopSorting("Sort: rebalance error: " .. tostring(moved))
     return
@@ -721,8 +746,6 @@ local function runSortPass()
     else
       stopSorting(("Sort: fully settled after %d pass(es), %d item(s) moved total"):format(sortPass, sortTotalMoved))
     end
-  elseif sortPass >= SORT_MAX_PASSES then
-    stopSorting(("Sort: stopped after hitting the %d-pass safety cap, %d item(s) moved total (still making progress - touch SORT NOW again to continue)"):format(SORT_MAX_PASSES, sortTotalMoved))
   else
     sortTimer = os.startTimer(0)
   end

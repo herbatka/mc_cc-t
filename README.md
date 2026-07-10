@@ -149,12 +149,16 @@ computer, not anything special.
    heartbeat keep working normally in the meantime), instead of waiting on
    `REBALANCE_INTERVAL` to tick several times on its own. The button turns
    green and reads "SORTING... (touch to stop)" while it's running -
-   touching it again stops it early. Left alone, it stops on its own once a
-   pass moves nothing: either fully settled, or stuck because storage is
-   genuinely full (no free slot anywhere left to evict into) - the
-   terminal prints one summary line per pass plus a final outcome either
-   way, and there's also a 50-pass safety cap in case it's still making
-   slow progress (touch it again to keep going past that). The button
+   touching it again stops it early. Left alone, it keeps going with no
+   pass limit - however many it actually takes on a big, badly-scattered
+   network - stopping only once a pass moves nothing: either fully settled,
+   or stuck because storage is genuinely full (no free slot anywhere left
+   to evict into). It also ignores the rank-order hysteresis deadzone
+   entirely while running, so a manual sort always reflects the exact
+   current totals right now rather than waiting out `RANK_SWAP_THRESHOLD`
+   (periodic automatic rebalancing still keeps that deadzone, so normal
+   play doesn't cause needless swapping the rest of the time). The terminal
+   prints one summary line per pass plus a final outcome, and the button
    survives the monitor scrolling past it, since it's redrawn every time
    new detail pushes it off-screen.
 
