@@ -59,7 +59,7 @@ local API_BASE = "http://127.0.0.1:3001"
 -- instead of its own. Set this to this computer's own monitor's exact
 -- peripheral name (check with the `peripheral.getNames()` trick - e.g.
 -- "monitor_0") if that happens; leave nil to keep auto-finding.
-local MONITOR_NAME = nil
+local MONITOR_NAME = "left"
 ----------------------------------------------------------------------------
 
 local monitor = MONITOR_NAME and peripheral.wrap(MONITOR_NAME) or peripheral.find("monitor")
